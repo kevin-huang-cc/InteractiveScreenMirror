@@ -1,0 +1,26 @@
+name: InteractiveScreenMirror
+options:
+  bundleIdPrefix: com.accurise.ism
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  InteractiveScreenMirror:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    info:
+      path: Info.plist
+      properties:
+        NSScreenCaptureUsageDescription: Stream this Mac to the Vision Pro.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        LSMinimumSystemVersion: "14.0"
+        CFBundleName: InteractiveScreenMirror
+        CFBundleDisplayName: InteractiveScreenMirror
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.accurise.ism.mac
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.9"
