@@ -8,6 +8,8 @@
 	<array>
 		<string>_ism._tcp</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connects to your Mac on the local network to mirror its display.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationPreferredDefaultSceneSessionRole</key>
