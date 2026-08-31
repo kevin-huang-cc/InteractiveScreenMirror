@@ -22,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task {
             for screen in screens {
-                let cap = ScreenCapturer(streamID: screen.streamID, displayID: screen.displayID)
+                let cap = ScreenCapturer(streamID: screen.streamID, displayID: screen.displayID, fps: screen.fps)
                 cap.onParameterSets = { [weak self] id, data in self?.server.sendParameterSets(id, data) }
                 cap.onFrame = { [weak self] id, data, key in self?.server.sendFrame(id, data, isKeyframe: key) }
                 do {

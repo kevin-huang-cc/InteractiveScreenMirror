@@ -35,9 +35,11 @@ final class MirrorClient: ObservableObject {
     private init() {
         reassembler.onMessage = { [weak self] h, payload in self?.handle(h, payload) }
         reassembler.onLoss = { [weak self] stream in
-            // A fragment never arrived; ask for a keyframe instead of showing
-            // corruption until the next scheduled one.
-            self?.send(.keyframeReq, stream: stream, Data())
+            guard let self else { return }
+            // A fragment never arrived. Stop decoding until an IDR lands, and
+            // ask the Mac for one now rather than waiting out the GOP.
+            self.state(for: stream).decoder.requestResync()
+            self.send(.keyframeReq, stream: stream, Data())
         }
     }
 
@@ -63,6 +65,7 @@ final class MirrorClient: ObservableObject {
         guard browser == nil else { return }
         let params = NWParameters.udp
         params.includePeerToPeer = true
+        params.serviceClass = .interactiveVideo
 
         let b = NWBrowser(for: .bonjour(type: "_ism._udp", domain: nil), using: params)
         b.browseResultsChangedHandler = { [weak self] results, _ in

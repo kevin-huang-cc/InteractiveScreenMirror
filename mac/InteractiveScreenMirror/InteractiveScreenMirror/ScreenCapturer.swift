@@ -6,6 +6,7 @@ import CoreMedia
 final class ScreenCapturer: NSObject, SCStreamOutput {
     let streamID: UInt8
     private let displayID: CGDirectDisplayID
+    private let fps: Int
     private var stream: SCStream?
     private var encoder: VideoEncoder?
     private var dropped = 0
@@ -13,9 +14,10 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
     var onParameterSets: (UInt8, Data) -> Void = { _, _ in }
     var onFrame: (UInt8, Data, Bool) -> Void = { _, _, _ in }
 
-    init(streamID: UInt8, displayID: CGDirectDisplayID) {
+    init(streamID: UInt8, displayID: CGDirectDisplayID, fps: Int) {
         self.streamID = streamID
         self.displayID = displayID
+        self.fps = fps
         super.init()
     }
 
@@ -26,7 +28,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
                 NSLocalizedDescriptionKey: "display \(displayID) not visible to ScreenCaptureKit"])
         }
 
-        let enc = try VideoEncoder(width: display.width, height: display.height)
+        let enc = try VideoEncoder(width: display.width, height: display.height, fps: fps)
         enc.onParameterSets = { [weak self] in
             guard let self else { return }
             self.onParameterSets(self.streamID, $0)
@@ -40,7 +42,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
         let cfg = SCStreamConfiguration()
         cfg.width = display.width
         cfg.height = display.height
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         // 3 is the SCK minimum for realtime. The previous 5 held ~83ms of
         // frames in front of the encoder for no benefit.

@@ -94,12 +94,39 @@ and the app logs a warning rather than crashing.
 App Sandbox must be **disabled** on the Mac target or `NWListener.bind()` fails
 with EPERM.
 
+## Findings on hiDPI and refresh rate
+
+Measured on macOS 26.2 with `tools/probe.m` and one-config-per-process tests:
+
+- **90Hz virtual displays work.** `CGDisplayModeGetRefreshRate` confirms 90Hz.
+  This matters: Vision Pro's compositor runs at 90Hz, and 60fps content lands
+  at an arbitrary phase against it, which reads as judder even when latency is
+  fine.
+- **`hiDPI = 1` is useless here.** It generates no 2x modes for a virtual
+  display — enumerating `CGDisplayCopyAllDisplayModes` shows every mode with
+  `pixels == points`. It only halves usable resolution. It also requires the
+  mode to be declared at *point* size; passing a pixel-size mode makes
+  registration fail while `applySettings` still returns `true`.
+- **`applySettings` returning true means nothing.** The display id appears
+  asynchronously and can stay 0 or unregistered. Poll `displayID` and
+  `CGDisplayPixelsWide` before trusting it.
+- **Duplicate serials collide silently.** Two processes creating displays with
+  the same vendor/product/serial: the second fails with no error, looking
+  exactly like the private API having broken. Serial now includes the pid.
+- Creating and destroying virtual displays rapidly in a loop **segfaults**.
+  Space them out.
+
 ## Open questions
 
 - **Is AWDL actually being used?** `dns-sd -B _ism._udp local` shows the service
   on lo0/en0/bridge100 but not awdl0 when nothing is browsing. macOS brings
   AWDL up on demand, so this may only appear once a Vision Pro connects with
-  P2P enabled. Unverified.
+  P2P enabled. Unverified. Check `netstat -I awdl0` byte counters while
+  streaming — if they stay flat, traffic is going via the router.
+- **Why is text soft?** hiDPI turned out to be a dead end, so the remaining
+  candidates are H.264 4:2:0 chroma subsampling (text edges are its worst
+  case), bitrate, and any resampling between the 2560px-wide stream and the
+  window's rendered size in the headset. Untested.
 - **How many streams before it hurts?** M4 Pro encode and Vision Pro decode
   both have ceilings. Guess is 3–4 comfortable, 6+ painful. Untested.
 - **HEVC** — better compression, hardware-decoded on Vision Pro. Parameter set

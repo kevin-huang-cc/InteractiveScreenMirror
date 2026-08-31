@@ -12,13 +12,19 @@ final class VideoEncoder {
     /// (frame bytes, isKeyframe)
     var onFrame: (Data, Bool) -> Void = { _, _ in }
 
-    init(width: Int, height: Int) throws {
+    init(width: Int, height: Int, fps: Int) throws {
         var s: VTCompressionSession?
+        // Apple Silicon's low-latency rate controller: shorter encode pipeline
+        // and steadier output size per frame, which matters more than peak
+        // quality for a live desktop.
+        let spec: [CFString: Any] = [
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue as Any
+        ]
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width), height: Int32(height),
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil, imageBufferAttributes: nil,
+            encoderSpecification: spec as CFDictionary, imageBufferAttributes: nil,
             compressedDataAllocator: nil, outputCallback: nil, refcon: nil,
             compressionSessionOut: &s)
         guard status == noErr, let session = s else {
@@ -33,12 +39,17 @@ final class VideoEncoder {
         // Without this the encoder may hold frames for lookahead — pure added latency.
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaximizePowerEfficiency, value: kCFBooleanFalse)
-        // Shorter GOP: a lost frame resyncs in <= 0.5s even if a keyframe request is dropped.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: 30))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: 60))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: 25_000_000))
+        // Backstop only — loss recovery is driven by keyframe requests, so
+        // keyframes need not be frequent. Each one is a burst of ~44 datagrams
+        // and any single loss costs the whole frame.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: fps * 2))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
+        // Text is the worst case for H.264 4:2:0 — sharp edges and high
+        // frequency detail. Scale bitrate with pixels rather than fixing it.
+        let bitrate = min(60_000_000, max(12_000_000, width * height * fps / 12))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
-                             value: [NSNumber(value: 40_000_000 / 8), NSNumber(value: 1)] as CFArray)
+                             value: [NSNumber(value: bitrate * 3 / 2 / 8), NSNumber(value: 1)] as CFArray)
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
 

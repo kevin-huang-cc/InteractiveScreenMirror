@@ -8,6 +8,7 @@ struct VirtualScreen {
     let displayID: CGDirectDisplayID
     let width: Int
     let height: Int
+    let fps: Int
     fileprivate let handle: CGVirtualDisplay
 }
 
@@ -17,16 +18,25 @@ struct ScreenSpec {
     let name: String
     let width: Int
     let height: Int
-    /// hiDPI doubles the backing store: a 2560x1080 hiDPI display presents as
-    /// 1280x540 points, so text renders at Retina density.
+    /// Leave false. On macOS 26.2 the hiDPI flag generates no 2x modes for a
+    /// virtual display (every mode reports pixels == points), so it only halves
+    /// the usable resolution. It also requires the mode to be declared at point
+    /// size — setting it with a pixel-size mode makes registration fail
+    /// silently, with applySettings still returning true. Verified via
+    /// tools/probe.m. Text sharpness comes from resolution and bitrate instead.
     let hiDPI: Bool
+    /// Match Vision Pro's 90Hz compositor. At 60 the frames land at an
+    /// arbitrary phase against a 90Hz refresh, which reads as judder even
+    /// when latency is fine.
+    let refreshRate: Double
 
-    // ponytail: Vision Pro resolves ~34 pixels/degree, so a window filling ~60
-    // degrees is saturated near 2000px wide. Going wider spends bandwidth and
-    // encoder time on detail the optics cannot show. Sizes below sit under that.
+    // Pixel budget: every stream is a separate hardware encode AND a separate
+    // decode on the headset, so this trades directly against smoothness.
+    // Raise resolution only until text is sharp; past that you are encoding
+    // detail the optics cannot resolve.
     static let defaults: [ScreenSpec] = [
-        ScreenSpec(name: "ISM Wide",     width: 2560, height: 1080, hiDPI: false),
-        ScreenSpec(name: "ISM Portrait", width: 1200, height: 1600, hiDPI: false),
+        ScreenSpec(name: "ISM Wide",     width: 2560, height: 1080, hiDPI: false, refreshRate: 90),
+        ScreenSpec(name: "ISM Portrait", width: 1200, height: 1600, hiDPI: false, refreshRate: 90),
     ]
 }
 
@@ -39,7 +49,9 @@ final class VirtualDisplayManager {
     func createAll(_ specs: [ScreenSpec]) -> [VirtualScreen] {
         for (i, spec) in specs.enumerated() {
             guard let s = create(spec, streamID: UInt8(i)) else {
-                NSLog("[ISM] virtual display '\(spec.name)' failed — skipping")
+                NSLog("[ISM] virtual display '\(spec.name)' failed to register. "
+                    + "Check for an older instance still running (pgrep -x InteractiveScreenMirror); "
+                    + "if none, re-run tools/probe.m to see if the private API changed.")
                 continue
             }
             NSLog("[ISM] virtual display '\(spec.name)' -> displayID=\(s.displayID) \(s.width)x\(s.height)")
@@ -60,7 +72,11 @@ final class VirtualDisplayManager {
                                         height: Double(spec.height) * 0.254)
         desc.vendorID = 0x1234
         desc.productID = 0x5678
-        desc.serialNum = UInt32(streamID) + 1
+        // Unique per process. A previous instance still holding displays with
+        // the same serial makes registration fail silently — which looks
+        // exactly like the private API having broken.
+        desc.serialNum = (UInt32(truncatingIfNeeded: ProcessInfo.processInfo.processIdentifier) << 8)
+                       | UInt32(streamID)
         // sRGB primaries — without these macOS may reject the display.
         desc.redPrimary   = CGPoint(x: 0.640,  y: 0.330)
         desc.greenPrimary = CGPoint(x: 0.300,  y: 0.600)
@@ -72,14 +88,24 @@ final class VirtualDisplayManager {
         let settings = CGVirtualDisplaySettings()
         settings.modes = [CGVirtualDisplayMode(width: UInt32(spec.width),
                                                height: UInt32(spec.height),
-                                               refreshRate: 60)]
+                                               refreshRate: spec.refreshRate)]
         settings.hiDPI = spec.hiDPI ? 1 : 0
-        guard display.apply(settings), display.displayID != 0 else { return nil }
+        // applySettings returns true even when registration fails, and the
+        // display id appears asynchronously — so poll rather than trust it.
+        guard display.apply(settings) else { return nil }
+        var displayID: CGDirectDisplayID = 0
+        for _ in 0..<40 {
+            displayID = display.displayID
+            if displayID != 0, CGDisplayPixelsWide(displayID) > 0 { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        guard displayID != 0, CGDisplayPixelsWide(displayID) > 0 else { return nil }
 
         return VirtualScreen(streamID: streamID,
-                             displayID: display.displayID,
+                             displayID: displayID,
                              width: spec.width,
                              height: spec.height,
+                             fps: Int(spec.refreshRate),
                              handle: display)
     }
 

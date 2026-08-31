@@ -5,10 +5,16 @@ import VideoToolbox
 final class VideoDecoder {
     private var formatDescription: CMVideoFormatDescription?
     private var lastParams: Data?
+    private var needsKeyframe = false
 
     var onSampleBuffer: (CMSampleBuffer) -> Void = { _ in }
 
     var isReady: Bool { formatDescription != nil }
+
+    /// Called after a frame is lost. Every later P-frame references data we
+    /// never received, so decoding them paints visible corruption. Skip until
+    /// the next IDR — a brief hold looks far better than breakup.
+    func requestResync() { needsKeyframe = true }
 
     /// Parameter sets arrive with every keyframe over UDP. Rebuilding the format
     /// description each time would churn the decoder, so ignore repeats.
@@ -46,6 +52,10 @@ final class VideoDecoder {
 
     func handleFrame(_ data: Data) {
         guard let fd = formatDescription else { return }
+        if needsKeyframe {
+            guard Self.containsIDR(data) else { return }
+            needsKeyframe = false
+        }
 
         // Let CMBlockBuffer own its allocation, then copy in. The previous
         // version handed it a malloc'd pointer with a mismatched allocator.
@@ -82,6 +92,21 @@ final class VideoDecoder {
                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
         }
         onSampleBuffer(sb)
+    }
+
+    /// Walks the AVCC length-prefixed NAL units looking for an IDR (type 5).
+    private static func containsIDR(_ data: Data) -> Bool {
+        var i = data.startIndex
+        while i + 4 <= data.endIndex {
+            let len = Int(data[i..<(i + 4)].withUnsafeBytes {
+                $0.loadUnaligned(as: UInt32.self).bigEndian
+            })
+            i += 4
+            guard len > 0, i + len <= data.endIndex else { return false }
+            if data[i] & 0x1F == 5 { return true }
+            i += len
+        }
+        return false
     }
 
     private func readChunk(_ data: Data, cursor: inout Int) -> Data? {

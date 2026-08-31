@@ -31,6 +31,9 @@ final class Server {
         let params = NWParameters.udp
         // AWDL: the direct Mac<->Vision Pro radio path, skipping the router.
         params.includePeerToPeer = true
+        // Puts frames in the WiFi video queue (WMM AC_VI) instead of
+        // best-effort, so they are not stuck behind bulk traffic.
+        params.serviceClass = .interactiveVideo
 
         let l = try NWListener(using: params, on: NWEndpoint.Port(rawValue: Self.port)!)
         l.service = NWListener.Service(name: "InteractiveScreenMirror", type: Self.serviceType)
