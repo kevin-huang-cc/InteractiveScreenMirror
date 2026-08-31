@@ -37,17 +37,31 @@ One UDP socket carries every stream. Datagram header is 10 bytes:
 
 | Type | Direction | Payload |
 |------|-----------|---------|
-| `0x01` META | Mac → VP | JSON `[{id,w,h}]` — one entry per virtual display |
+| `0x01` META | Mac → VP | JSON `[{id,w,h,modes}]` — one entry per virtual display |
 | `0x02` PARAM | Mac → VP | `[4B spsLen][SPS][4B ppsLen][PPS]` |
 | `0x03` FRAME | Mac → VP | AVCC NAL units, fragmented to 1200B |
 | `0x10` CLICK | VP → Mac | JSON `{x,y}` normalized 0..1 |
 | `0x20` HELLO | VP → Mac | announces the client endpoint |
 | `0x21` KEYFRAMEREQ | VP → Mac | a fragment was lost, resync now |
+| `0x22` SETMODE | VP → Mac | JSON `{w,h}` — switch this display's resolution |
 
 UDP has no retransmission, so reliability is bought with repetition instead:
-PARAM and META ride along with every keyframe, and clicks are sent three times
-with the same id (the Mac dedupes). Frames that never complete are dropped and
+PARAM and META ride along with every keyframe, and clicks and mode changes are
+sent three times with the same id (the Mac dedupes — without that, one pick
+reconfigures the display and restarts capture three times). Frames that never complete are dropped and
 trigger a keyframe request.
+
+## Resolution and window shape
+
+Each stream window carries a resolution picker in a bottom ornament, listing
+the modes that display actually reports, filtered to its native aspect ratio so
+switching never changes the window's shape. Picking one reconfigures the Mac
+display and rebuilds that stream's capture and encoder (a
+`VTCompressionSession` is fixed at its creation size).
+
+Stream windows use `UIWindowSceneResizingRestrictionsUniform`, so pinch-resize
+scales the window while preserving the display's aspect ratio rather than
+letting you stretch it freeform.
 
 ## Configuring virtual displays
 

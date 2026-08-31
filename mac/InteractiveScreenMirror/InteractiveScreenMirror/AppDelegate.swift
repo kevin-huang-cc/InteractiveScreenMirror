@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         server.onKeyframeRequest = { [weak self] stream in
             self?.capturers.first { $0.streamID == stream }?.requestKeyframe()
         }
+        server.onSetMode = { [weak self] stream, w, h in
+            self?.changeMode(stream: stream, width: w, height: h)
+        }
 
         Task {
             for screen in screens {
@@ -37,6 +40,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try server.start(screens: screens)
             } catch {
                 NSLog("[ISM] server failed to start: \(error)")
+            }
+        }
+    }
+
+    /// A VTCompressionSession is fixed at its creation size and SCStream's
+    /// config is set at start, so a resolution change means rebuilding the
+    /// whole capture path for that stream.
+    private func changeMode(stream: UInt8, width: Int, height: Int) {
+        Task { @MainActor in
+            guard displays.setMode(streamID: stream, width: width, height: height) != nil,
+                  let screen = displays.screen(for: stream) else { return }
+
+            if let idx = capturers.firstIndex(where: { $0.streamID == stream }) {
+                let old = capturers.remove(at: idx)
+                await old.stop()
+            }
+            let cap = ScreenCapturer(streamID: stream, displayID: screen.displayID, fps: screen.fps)
+            cap.onParameterSets = { [weak self] id, data in self?.server.sendParameterSets(id, data) }
+            cap.onFrame = { [weak self] id, data, key in self?.server.sendFrame(id, data, isKeyframe: key) }
+            do {
+                try await cap.start()
+                capturers.append(cap)
+                server.updateScreens(displays.screens)
+                NSLog("[ISM] stream \(stream): capture restarted at \(width)x\(height)")
+            } catch {
+                NSLog("[ISM] stream \(stream): restart failed: \(error)")
             }
         }
     }

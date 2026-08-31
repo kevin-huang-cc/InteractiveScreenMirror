@@ -9,6 +9,10 @@ final class StreamState: ObservableObject, Identifiable {
     let id: UInt8
     @Published var aspect: CGFloat = 16.0 / 9.0
     @Published var hasFrame = false
+    /// Current resolution of the Mac-side virtual display.
+    @Published var size: CGSize = .zero
+    /// Resolutions this display can switch to, widest first.
+    @Published var modes: [CGSize] = []
     let layer = AVSampleBufferDisplayLayer()
     let decoder = VideoDecoder()
 
@@ -122,6 +126,16 @@ final class MirrorClient: ObservableObject {
         }
     }
 
+    /// Asks the Mac to switch a virtual display's resolution. Sent three times
+    /// like clicks: UDP has no retransmit and a dropped request looks like the
+    /// picker silently doing nothing.
+    func setMode(stream: UInt8, width: Int, height: Int) {
+        guard let payload = try? JSONSerialization.data(withJSONObject: ["w": width, "h": height]) else { return }
+        clickSeq &+= 1
+        let seq = clickSeq
+        for _ in 0..<3 { emit(.setMode, stream: stream, id: seq, payload) }
+    }
+
     private func send(_ type: WireType, stream: UInt8, _ payload: Data) {
         clickSeq &+= 1
         emit(type, stream: stream, id: clickSeq, payload)
@@ -145,6 +159,12 @@ final class MirrorClient: ObservableObject {
                           let hh = (entry["h"] as? NSNumber)?.doubleValue, hh > 0 else { continue }
                     let s = self.state(for: id)
                     s.aspect = CGFloat(w / hh)
+                    s.size = CGSize(width: w, height: hh)
+                    if let raw = entry["modes"] as? [[NSNumber]] {
+                        s.modes = raw.compactMap {
+                            $0.count == 2 ? CGSize(width: $0[0].doubleValue, height: $0[1].doubleValue) : nil
+                        }
+                    }
                     if !self.streamIDs.contains(id) { self.streamIDs.append(id); self.streamIDs.sort() }
                 }
             }

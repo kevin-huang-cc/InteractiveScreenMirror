@@ -7,6 +7,7 @@ enum WireType: UInt8 {
     case click       = 0x10   // VP  -> Mac : JSON {x,y}
     case hello       = 0x20   // VP  -> Mac : announces the client endpoint
     case keyframeReq = 0x21   // VP  -> Mac : a frame was lost, resync now
+    case setMode     = 0x22   // VP  -> Mac : JSON {w,h} switch this display's resolution
 }
 
 /// Datagram layout: [1B type][1B streamID][4B msgID][2B fragIndex][2B fragCount][payload]

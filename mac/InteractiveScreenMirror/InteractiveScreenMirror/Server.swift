@@ -18,10 +18,15 @@ final class Server {
     /// Cached per stream so a client connecting after the initial IDR can start
     /// decoding immediately instead of waiting for the next keyframe.
     private var lastParams: [UInt8: Data] = [:]
-    private var seenClicks: Set<UInt64> = []
-    private var clickOrder: [UInt64] = []
+    // Clients repeat clicks and mode changes three times because UDP has no
+    // retransmit, so every repeated command needs deduping — a mode change
+    // applied three times reconfigures the display and restarts capture three
+    // times over.
+    private var seenCommands: Set<UInt64> = []
+    private var commandOrder: [UInt64] = []
 
     var onKeyframeRequest: (UInt8) -> Void = { _ in }
+    var onSetMode: (UInt8, Int, Int) -> Void = { _, _, _ in }
 
     init() {
         reassembler.onMessage = { [weak self] h, payload in
@@ -89,8 +94,19 @@ final class Server {
         }
     }
 
+    /// Called after a resolution change so the headset can resize its window.
+    func updateScreens(_ screens: [VirtualScreen]) {
+        queue.async {
+            self.screens = screens
+            self.sendMeta()
+        }
+    }
+
     private func sendMeta() {
-        let list = screens.map { ["id": Int($0.streamID), "w": $0.width, "h": $0.height] }
+        let list: [[String: Any]] = screens.map {
+            ["id": Int($0.streamID), "w": $0.width, "h": $0.height,
+             "modes": $0.availableModes.map { [$0.width, $0.height] }]
+        }
         guard let json = try? JSONSerialization.data(withJSONObject: list) else { return }
         emit(.meta, stream: 0, json)
     }
@@ -118,14 +134,14 @@ final class Server {
             for screen in screens { onKeyframeRequest(screen.streamID) }
         case .keyframeReq:
             onKeyframeRequest(h.stream)
+        case .setMode:
+            guard isNewCommand(h) else { return }
+            guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+                  let w = (obj["w"] as? NSNumber)?.intValue,
+                  let hh = (obj["h"] as? NSNumber)?.intValue else { return }
+            onSetMode(h.stream, w, hh)
         case .click:
-            // Clients send each click three times; dedupe by (stream, id).
-            let key = (UInt64(h.stream) << 32) | UInt64(h.id)
-            guard !seenClicks.contains(key) else { return }
-            seenClicks.insert(key)
-            clickOrder.append(key)
-            if clickOrder.count > 256 { seenClicks.remove(clickOrder.removeFirst()) }
-
+            guard isNewCommand(h) else { return }
             guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                   let nx = (obj["x"] as? NSNumber)?.doubleValue,
                   let ny = (obj["y"] as? NSNumber)?.doubleValue else { return }
@@ -133,6 +149,16 @@ final class Server {
         default:
             break
         }
+    }
+
+    /// True the first time a (stream, id) pair is seen. Bounded history.
+    private func isNewCommand(_ h: Wire.Header) -> Bool {
+        let key = (UInt64(h.stream) << 32) | UInt64(h.id)
+        guard !seenCommands.contains(key) else { return false }
+        seenCommands.insert(key)
+        commandOrder.append(key)
+        if commandOrder.count > 256 { seenCommands.remove(commandOrder.removeFirst()) }
+        return true
     }
 
     private func injectClick(stream: UInt8, nx: Double, ny: Double) {

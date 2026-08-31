@@ -6,9 +6,13 @@ import CoreGraphics
 struct VirtualScreen {
     let streamID: UInt8
     let displayID: CGDirectDisplayID
-    let width: Int
-    let height: Int
+    /// Current mode. Changes when the headset picks a different resolution.
+    var width: Int
+    var height: Int
     let fps: Int
+    /// Resolutions this display can switch to, widest first. Filtered to the
+    /// native aspect so switching never letterboxes.
+    var availableModes: [(width: Int, height: Int)] = []
     fileprivate let handle: CGVirtualDisplay
 }
 
@@ -106,10 +110,69 @@ final class VirtualDisplayManager {
                              width: spec.width,
                              height: spec.height,
                              fps: Int(spec.refreshRate),
+                             availableModes: Self.modes(for: displayID, aspect: Double(spec.width) / Double(spec.height)),
                              handle: display)
     }
 
     func screen(for streamID: UInt8) -> VirtualScreen? {
         screens.first { $0.streamID == streamID }
+    }
+
+    /// Switches a display to one of its advertised modes. Returns the new size.
+    @discardableResult
+    func setMode(streamID: UInt8, width: Int, height: Int) -> (Int, Int)? {
+        guard let idx = screens.firstIndex(where: { $0.streamID == streamID }) else { return nil }
+        // Already there — don't reconfigure and restart capture for nothing.
+        guard screens[idx].width != width || screens[idx].height != height else { return nil }
+        let displayID = screens[idx].displayID
+        guard let all = CGDisplayCopyAllDisplayModes(displayID, nil) as? [CGDisplayMode],
+              let target = all.first(where: {
+                  $0.pixelWidth == width && $0.pixelHeight == height
+              }) else {
+            NSLog("[ISM] stream \(streamID): no mode \(width)x\(height)")
+            return nil
+        }
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success else { return nil }
+        CGConfigureDisplayWithDisplayMode(config, displayID, target, nil)
+        guard CGCompleteDisplayConfiguration(config, .permanently) == .success else {
+            CGCancelDisplayConfiguration(config)
+            return nil
+        }
+        screens[idx].width = width
+        screens[idx].height = height
+        NSLog("[ISM] stream \(streamID): switched to \(width)x\(height)")
+        return (width, height)
+    }
+
+    /// Real modes reported by the display, narrowed to the native aspect ratio
+    /// so a resolution change never changes the shape of the window.
+    private static func modes(for displayID: CGDirectDisplayID, aspect: Double) -> [(width: Int, height: Int)] {
+        // The mode list populates later than the display itself: right after
+        // creation CGDisplayCopyAllDisplayModes returns nil even though
+        // CGDisplayPixelsWide already reports the right size.
+        var all: [CGDisplayMode] = []
+        for _ in 0..<40 {
+            if let m = CGDisplayCopyAllDisplayModes(displayID, nil) as? [CGDisplayMode], !m.isEmpty {
+                all = m
+                break
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        guard !all.isEmpty else {
+            NSLog("[ISM] display \(displayID): no modes enumerated; resolution switching unavailable")
+            return []
+        }
+        var seen = Set<String>()
+        var out: [(width: Int, height: Int)] = []
+        for m in all {
+            let w = m.pixelWidth, h = m.pixelHeight
+            guard w > 0, h > 0, w % 2 == 0, h % 2 == 0 else { continue }
+            // H.264 wants even dimensions; keep only the native shape.
+            guard abs(Double(w) / Double(h) - aspect) / aspect < 0.01 else { continue }
+            let key = "\(w)x\(h)"
+            if seen.insert(key).inserted { out.append((w, h)) }
+        }
+        return out.sorted { $0.width > $1.width }
     }
 }

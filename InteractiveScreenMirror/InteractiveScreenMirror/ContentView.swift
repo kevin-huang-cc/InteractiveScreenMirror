@@ -67,6 +67,37 @@ private struct StreamSurface: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            .background(UniformResize(aspect: stream.aspect))
+            .ornament(attachmentAnchor: .scene(.bottom)) {
+                resolutionPicker
+            }
+        }
+    }
+
+    @ViewBuilder private var resolutionPicker: some View {
+        if stream.modes.count > 1 {
+            Menu {
+                ForEach(stream.modes, id: \.self) { mode in
+                    Button {
+                        client.setMode(stream: stream.id,
+                                       width: Int(mode.width), height: Int(mode.height))
+                    } label: {
+                        if mode == stream.size {
+                            Label("\(Int(mode.width)) × \(Int(mode.height))", systemImage: "checkmark")
+                        } else {
+                            Text("\(Int(mode.width)) × \(Int(mode.height))")
+                        }
+                    }
+                }
+            } label: {
+                Label(stream.size == .zero
+                        ? "Resolution"
+                        : "\(Int(stream.size.width)) × \(Int(stream.size.height))",
+                      systemImage: "rectangle.inset.filled")
+            }
+            .menuStyle(.button)
+            .padding(.horizontal, 8)
+            .glassBackgroundEffect()
         }
     }
 
@@ -75,6 +106,51 @@ private struct StreamSurface: View {
         return container.width / container.height > aspect
             ? CGSize(width: container.height * aspect, height: container.height)
             : CGSize(width: container.width, height: container.width / aspect)
+    }
+}
+
+/// visionOS resizes windows freeform by default, which lets the user stretch a
+/// stream away from its display's aspect ratio. `.uniform` makes the resize
+/// handles scale the window while preserving shape.
+struct UniformResize: UIViewRepresentable {
+    let aspect: CGFloat
+
+    func makeUIView(context: Context) -> UIView { Applier(aspect: aspect) }
+    func updateUIView(_ uiView: UIView, context: Context) {
+        (uiView as? Applier)?.apply(aspect: aspect)
+    }
+
+    final class Applier: UIView {
+        private var aspect: CGFloat
+        private var sized = false
+
+        init(aspect: CGFloat) {
+            self.aspect = aspect
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+        required init?(coder: NSCoder) { fatalError("not used") }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            apply(aspect: aspect)
+        }
+
+        func apply(aspect newAspect: CGFloat) {
+            aspect = newAspect
+            guard let scene = window?.windowScene, aspect > 0 else { return }
+            let prefs = UIWindowScene.GeometryPreferences.Vision()
+            prefs.resizingRestrictions = .uniform
+            // Shape the window to the display once, then let uniform resizing
+            // keep it there. Re-sizing on every update would fight the user.
+            if !sized {
+                sized = true
+                let width: CGFloat = 1280
+                prefs.size = CGSize(width: width, height: width / aspect)
+                prefs.minimumSize = CGSize(width: 400, height: 400 / aspect)
+            }
+            scene.requestGeometryUpdate(prefs)
+        }
     }
 }
 

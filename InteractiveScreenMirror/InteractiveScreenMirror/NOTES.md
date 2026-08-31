@@ -116,6 +116,29 @@ Measured on macOS 26.2 with `tools/probe.m` and one-config-per-process tests:
 - Creating and destroying virtual displays rapidly in a loop **segfaults**.
   Space them out.
 
+## Resolution switching
+
+- `CGDisplayCopyAllDisplayModes` returns **nil** for a freshly created virtual
+  display, even after `CGDisplayPixelsWide` reports the correct size. The mode
+  list populates later than the display, so poll for it.
+- Advertised modes are filtered to the display's native aspect (within 1%) and
+  to even dimensions, which H.264 wants.
+- Switching uses `CGBeginDisplayConfiguration` /
+  `CGConfigureDisplayWithDisplayMode`, then tears down and rebuilds that
+  stream's `ScreenCapturer` — `SCStream`'s config is fixed at start and a
+  `VTCompressionSession` is fixed at its creation size.
+- Repeated commands must be deduped. Clients send three copies of clicks and
+  mode changes; without deduping, one resolution pick reconfigured the display
+  and restarted capture three times.
+
+## Window resizing
+
+visionOS windows are freeform by default. `UIWindowScene.GeometryPreferences.Vision`
+with `resizingRestrictions = .uniform` makes pinch-resize preserve aspect ratio.
+Applied per stream window via a `UIViewRepresentable` that reaches its
+`windowScene` in `didMoveToWindow`. The initial size is set once — re-sizing on
+every update fights the user.
+
 ## Open questions
 
 - **Is AWDL actually being used?** `dns-sd -B _ism._udp local` shows the service
