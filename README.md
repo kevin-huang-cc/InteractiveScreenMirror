@@ -1,68 +1,119 @@
 # InteractiveScreenMirror
 
-Stream a Mac display into a visionOS window. Pinch in visionOS → click on the Mac.
+Creates virtual monitors on a Mac and streams each one to its own window on
+Apple Vision Pro. Drag any app onto a virtual display and it appears in the
+headset as a separate, movable window. Pinch to click.
 
-MVP scope only: video one-way, click one-way. No drag, no scroll, no keyboard, no audio, no smoothing. Native pipeline — no WebRTC, no third-party deps.
+Native pipeline — ScreenCaptureKit, VideoToolbox, Network.framework. No
+third-party dependencies.
 
-## Architecture
+## How it works
 
 ```
-Mac:    ScreenCaptureKit → VTCompressionSession (H.264) → TCP server (port 7777)
-                                                            ↓
-                                                       length-prefixed messages
-                                                            ↓
-visionOS:                  TCP client → CMSampleBuffer ← AVSampleBufferDisplayLayer
-                                          ↑
-                                     pinch → click event back over the same socket
+Mac                                              Vision Pro
+  CGVirtualDisplay  x N   (private API)            NWBrowser (_ism._udp, P2P)
+        |                                               |
+  ScreenCaptureKit (one SCStream per display)      NWConnection (UDP)
+        |                                               |
+  VTCompressionSession (H.264, one per stream)     Reassembler (per stream)
+        |                                               |
+  UDP datagrams, fragmented, stream-tagged   ->    VideoDecoder x N
+        |                                               |
+  NWListener (Bonjour _ism._udp, peer-to-peer)     AVSampleBufferDisplayLayer x N
+        ^                                               |
+        +---- click {stream, x, y} --------------  SpatialTapGesture
 ```
 
-Wire protocol: `[1-byte type][4-byte BE length][payload]`. Types: `META` (JSON dims), `PARAM` (SPS/PPS), `FRAME` (AVCC NAL units), `CLICK` (JSON normalized x,y).
+Clicks carry a stream id, so the Mac injects them at the right coordinates on
+the right virtual display.
 
-## Mac app
+## Wire protocol
 
-The Mac side has no Xcode project yet — only sources and an xcodegen spec at `mac/`. To run:
+One UDP socket carries every stream. Datagram header is 10 bytes:
+
+```
+[1B type][1B streamID][4B msgID][2B fragIndex][2B fragCount][payload...]
+```
+
+| Type | Direction | Payload |
+|------|-----------|---------|
+| `0x01` META | Mac → VP | JSON `[{id,w,h}]` — one entry per virtual display |
+| `0x02` PARAM | Mac → VP | `[4B spsLen][SPS][4B ppsLen][PPS]` |
+| `0x03` FRAME | Mac → VP | AVCC NAL units, fragmented to 1200B |
+| `0x10` CLICK | VP → Mac | JSON `{x,y}` normalized 0..1 |
+| `0x20` HELLO | VP → Mac | announces the client endpoint |
+| `0x21` KEYFRAMEREQ | VP → Mac | a fragment was lost, resync now |
+
+UDP has no retransmission, so reliability is bought with repetition instead:
+PARAM and META ride along with every keyframe, and clicks are sent three times
+with the same id (the Mac dedupes). Frames that never complete are dropped and
+trigger a keyframe request.
+
+## Configuring virtual displays
+
+Edit `ScreenSpec.defaults` in `mac/.../VirtualDisplayManager.swift`:
+
+```swift
+static let defaults: [ScreenSpec] = [
+    ScreenSpec(name: "ISM Wide",     width: 2560, height: 1080, hiDPI: false),
+    ScreenSpec(name: "ISM Portrait", width: 1200, height: 1600, hiDPI: false),
+]
+```
+
+Any aspect ratio works. Note that Vision Pro resolves roughly 34 pixels per
+degree, so a window filling ~60° of view is saturated around 2000px wide —
+past that you spend bandwidth and encoder time on detail the optics cannot
+resolve.
+
+## Build & run
+
+Set your team on both targets (Signing & Capabilities), then:
 
 ```sh
-brew install xcodegen
-(cd mac && xcodegen generate)
-open mac/InteractiveScreenMirror.xcodeproj
+# 1. Mac — must run first, it is the server
+open mac/InteractiveScreenMirror/InteractiveScreenMirror.xcodeproj
 ```
 
-Build & run in Xcode. On first launch macOS prompts for **Screen Recording**. You must also grant **Accessibility** manually in System Settings → Privacy & Security → Accessibility — without it, click injection silently no-ops. Note the IP printed in the Xcode console.
+Grant **Screen Recording** (relaunch after), and add the app to
+**Accessibility** manually — without it clicks silently no-op. Verify it is
+actually serving:
 
-## visionOS app
-
-Xcode project lives at `InteractiveScreenMirror/InteractiveScreenMirror/InteractiveScreenMirror.xcodeproj`. Open and run on a real Vision Pro (not simulator — pinch input is hardware-only).
-
-If you previously added the `stasel/WebRTC` Swift package, **remove it** — we no longer use it. File → Package Dependencies → select WebRTC → minus.
-
-Enter the Mac's IP in the field and tap Connect.
-
-## Known sharp edges
-
-- Accessibility permission must be re-granted whenever the app's binary identity changes (i.e. most rebuilds during development). Re-add it in System Settings if clicks stop working.
-- Same Wi-Fi only. No NAT traversal, no auth.
-- Only one Vision Pro client at a time — a new connection cancels the previous.
-- 60fps target, 12 Mbps H.264 baseline. Tune in `VideoEncoder.swift` if needed.
-
-## Layout
-
+```sh
+lsof -nP -iUDP:7777        # the LISTENING log line can lie; this cannot
+dns-sd -B _ism._udp local  # should list InteractiveScreenMirror
 ```
-mac/
-  project.yml                # xcodegen spec
-  Sources/
-    AppDelegate.swift        # lifecycle + permissions
-    ScreenCapturer.swift     # SCStream → VideoEncoder
-    VideoEncoder.swift       # VTCompressionSession (H.264, AVCC)
-    Server.swift             # NWListener TCP, frames out / clicks in
-    Wire.swift               # framing protocol
-InteractiveScreenMirror/
-  InteractiveScreenMirror/
-    InteractiveScreenMirror.xcodeproj
-    InteractiveScreenMirror/
-      InteractiveScreenMirrorApp.swift
-      ContentView.swift          # connect form + video surface + SpatialTapGesture
-      Client.swift               # NWConnection, parser/decoder wiring
-      VideoDecoder.swift         # build CMSampleBuffer from PARAM + FRAME
-      Wire.swift                 # mirror of Mac-side framing
+
+```sh
+# 2. visionOS — real device only, pinch input is hardware-only
+open InteractiveScreenMirror/InteractiveScreenMirror.xcodeproj
 ```
+
+Allow the Local Network prompt. The app finds the Mac over Bonjour — no IP to
+type. Each virtual display gets an "Open display N" button.
+
+## Private API
+
+`CGVirtualDisplay` and friends are private CoreGraphics classes with no public
+headers. `mac/.../ISMPrivate.h` declares them; the declarations were verified
+against the Objective-C runtime on macOS 26.2.
+
+After a macOS update, re-run `tools/probe.m` and compare. If the selectors
+drift, virtual display creation returns nil and the app logs a warning rather
+than crashing. This is personal-use tooling — it is not App Store shippable.
+
+## Checks
+
+```sh
+cd tools
+swiftc -O -o wirecheck Wire.swift main.swift && ./wirecheck   # framing + reassembly
+clang -fobjc-arc -framework Foundation -framework CoreGraphics -o probe probe.m && ./probe
+```
+
+## Known limitations
+
+- One-shot click only — no drag, scroll, right-click, or keyboard
+- One Vision Pro client at a time
+- Same network only — no NAT traversal, no auth, no encryption
+- No audio
+- H.264; HEVC would compress better and Vision Pro decodes it in hardware
+- App Sandbox must stay disabled on the Mac target or `NWListener` fails

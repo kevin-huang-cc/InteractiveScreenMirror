@@ -4,124 +4,159 @@ import Network
 import CoreMedia
 import AVFoundation
 
-final class MirrorClient: ObservableObject {
-    @Published var connectionState: String = "idle"
-    @Published var sourceAspect: CGFloat = 16.0 / 10.0
-    @Published var hasFirstFrame: Bool = false
+/// One virtual monitor's worth of state: its own decoder and display layer.
+final class StreamState: ObservableObject, Identifiable {
+    let id: UInt8
+    @Published var aspect: CGFloat = 16.0 / 9.0
+    @Published var hasFrame = false
+    let layer = AVSampleBufferDisplayLayer()
+    let decoder = VideoDecoder()
 
+    init(id: UInt8) {
+        self.id = id
+        layer.videoGravity = .resizeAspect
+    }
+}
+
+final class MirrorClient: ObservableObject {
+    static let shared = MirrorClient()
+
+    @Published var connectionState = "searching…"
+    @Published var streamIDs: [UInt8] = []
+
+    private var states: [UInt8: StreamState] = [:]
     private var connection: NWConnection?
     private var browser: NWBrowser?
-    private let parser = WireParser()
-    private let decoder = VideoDecoder()
-    let displayLayer = AVSampleBufferDisplayLayer()
+    private let reassembler = Reassembler()
+    private let queue = DispatchQueue(label: "ism.client")
+    private var clickSeq: UInt32 = 0
+    private let statesLock = NSLock()
 
-    init() {
-        displayLayer.videoGravity = .resizeAspect
-        decoder.onSampleBuffer = { [weak self] sb in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.displayLayer.enqueue(sb)
-                if !self.hasFirstFrame { self.hasFirstFrame = true }
-            }
-        }
-        parser.onMessage = { [weak self] type, payload in
-            self?.handle(type: type, payload: payload)
+    private init() {
+        reassembler.onMessage = { [weak self] h, payload in self?.handle(h, payload) }
+        reassembler.onLoss = { [weak self] stream in
+            // A fragment never arrived; ask for a keyframe instead of showing
+            // corruption until the next scheduled one.
+            self?.send(.keyframeReq, stream: stream, Data())
         }
     }
 
-    func connect(host: String, port: UInt16 = 7777) {
-        NSLog("[ISM] connect() host=\(host) port=\(port)")
-        primeLocalNetworkPermission()
-        publishState("connecting")
-        let nwHost = NWEndpoint.Host(host)
-        let nwPort = NWEndpoint.Port(rawValue: port)!
-        let conn = NWConnection(host: nwHost, port: nwPort, using: .tcp)
+    func state(for id: UInt8) -> StreamState {
+        statesLock.lock(); defer { statesLock.unlock() }
+        if let s = states[id] { return s }
+        let s = StreamState(id: id)
+        states[id] = s
+        s.decoder.onSampleBuffer = { [weak s] sb in
+            // AVSampleBufferDisplayLayer.enqueue is thread-safe; staying off the
+            // main thread keeps frames out of SwiftUI's queue.
+            s?.layer.enqueue(sb)
+            if s?.hasFrame == false {
+                DispatchQueue.main.async { s?.hasFrame = true }
+            }
+        }
+        return s
+    }
+
+    /// Browses for the Mac over Bonjour, including the peer-to-peer (AWDL)
+    /// interface — the same direct radio path Apple's own mirroring uses.
+    func start() {
+        guard browser == nil else { return }
+        let params = NWParameters.udp
+        params.includePeerToPeer = true
+
+        let b = NWBrowser(for: .bonjour(type: "_ism._udp", domain: nil), using: params)
+        b.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self, self.connection == nil, let first = results.first else { return }
+            self.connect(to: first.endpoint, params: params)
+        }
+        b.stateUpdateHandler = { [weak self] state in
+            if case .failed(let e) = state {
+                DispatchQueue.main.async { self?.connectionState = "browse failed: \(e)" }
+            }
+        }
+        b.start(queue: queue)
+        browser = b
+    }
+
+    private func connect(to endpoint: NWEndpoint, params: NWParameters) {
+        publish("connecting…")
+        let conn = NWConnection(to: endpoint, using: params)
         conn.stateUpdateHandler = { [weak self] state in
-            NSLog("[ISM] NWConnection state -> \(state)")
             guard let self else { return }
             switch state {
             case .ready:
-                self.publishState("connected")
-                self.receiveLoop()
+                self.publish("connected")
+                self.send(.hello, stream: 0, Data())
+                self.receiveLoop(conn)
             case .failed(let e):
-                self.publishState("failed: \(e)")
-                self.teardown()
-            case .waiting(let e):
-                self.publishState("waiting: \(e)")
+                self.publish("failed: \(e)")
+                self.connection = nil
             case .cancelled:
-                self.publishState("cancelled")
-                self.teardown()
-            default:
-                break
+                self.connection = nil
+            default: break
             }
         }
-        conn.start(queue: .global(qos: .userInitiated))
         connection = conn
+        conn.start(queue: queue)
     }
 
-    func sendClick(normalizedX nx: Double, normalizedY ny: Double) {
-        guard let conn = connection else { return }
-        let payload = try! JSONSerialization.data(withJSONObject: ["x": nx, "y": ny])
-        let msg = Wire.encode(.click, payload)
-        conn.send(content: msg, completion: .contentProcessed { _ in })
-    }
-
-    private func receiveLoop() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+    private func receiveLoop(_ conn: NWConnection) {
+        conn.receiveMessage { [weak self] data, _, _, error in
             guard let self else { return }
-            if let data, !data.isEmpty {
-                NSLog("[ISM] received \(data.count) bytes")
-                self.parser.feed(data)
-            }
-            if let error { NSLog("[ISM] receive error: \(error)") }
-            if isComplete || error != nil {
-                self.publishState("closed")
-                self.teardown()
-                return
-            }
-            self.receiveLoop()
+            if let data, !data.isEmpty { self.reassembler.feed(data) }
+            if error == nil { self.receiveLoop(conn) }
         }
     }
 
-    private func teardown() {
-        connection?.cancel()
-        connection = nil
-        DispatchQueue.main.async {
-            self.hasFirstFrame = false
-            self.displayLayer.flushAndRemoveImage()
+    func sendClick(stream: UInt8, nx: Double, ny: Double) {
+        guard let payload = try? JSONSerialization.data(withJSONObject: ["x": nx, "y": ny]) else { return }
+        clickSeq &+= 1
+        let seq = clickSeq
+        // ponytail: UDP has no retransmit and a lost click is very visible.
+        // Three copies with the same id; the Mac dedupes. Cheaper than an ACK.
+        for _ in 0..<3 {
+            emit(.click, stream: stream, id: seq, payload)
         }
     }
 
-    private func handle(type: WireType, payload: Data) {
-        NSLog("[ISM] message type=\(type) len=\(payload.count)")
-        switch type {
+    private func send(_ type: WireType, stream: UInt8, _ payload: Data) {
+        clickSeq &+= 1
+        emit(type, stream: stream, id: clickSeq, payload)
+    }
+
+    private func emit(_ type: WireType, stream: UInt8, id: UInt32, _ payload: Data) {
+        guard let conn = connection, conn.state == .ready else { return }
+        for d in Wire.datagrams(type, stream: stream, id: id, payload) {
+            conn.send(content: d, completion: .idempotent)
+        }
+    }
+
+    private func handle(_ h: Wire.Header, _ payload: Data) {
+        switch h.type {
         case .meta:
-            if let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
-               let w = (obj["w"] as? NSNumber)?.doubleValue,
-               let h = (obj["h"] as? NSNumber)?.doubleValue, h > 0 {
-                let aspect = CGFloat(w / h)
-                DispatchQueue.main.async { self.sourceAspect = aspect }
+            guard let list = try? JSONSerialization.jsonObject(with: payload) as? [[String: Any]] else { return }
+            DispatchQueue.main.async {
+                for entry in list {
+                    guard let id = (entry["id"] as? NSNumber)?.uint8Value,
+                          let w = (entry["w"] as? NSNumber)?.doubleValue,
+                          let hh = (entry["h"] as? NSNumber)?.doubleValue, hh > 0 else { continue }
+                    let s = self.state(for: id)
+                    s.aspect = CGFloat(w / hh)
+                    if !self.streamIDs.contains(id) { self.streamIDs.append(id); self.streamIDs.sort() }
+                }
             }
         case .param:
-            decoder.handleParameterSets(payload)
+            state(for: h.stream).decoder.handleParameterSets(payload)
         case .frame:
-            decoder.handleFrame(payload)
-        case .click:
+            let s = state(for: h.stream)
+            guard s.decoder.isReady else { return }
+            s.decoder.handleFrame(payload)
+        default:
             break
         }
     }
 
-    private func publishState(_ s: String) {
+    private func publish(_ s: String) {
         DispatchQueue.main.async { self.connectionState = s }
-    }
-
-    private func primeLocalNetworkPermission() {
-        guard browser == nil else { return }
-        let params = NWParameters()
-        params.includePeerToPeer = true
-        let b = NWBrowser(for: .bonjour(type: "_ism._tcp", domain: nil), using: params)
-        b.stateUpdateHandler = { _ in }
-        b.start(queue: .global(qos: .utility))
-        browser = b
     }
 }

@@ -2,6 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_ism._udp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Streams your virtual displays to Apple Vision Pro on the local network.</string>
 	<key>Stream this Mac to the Vision Pro</key>
 	<string></string>
 	<key>UTExportedTypeDeclarations</key>

@@ -2,60 +2,68 @@ import SwiftUI
 import AVFoundation
 import UIKit
 
+/// Lobby window: lists the Mac's virtual monitors, opens one window each.
 struct ContentView: View {
-    @StateObject private var client = MirrorClient()
-    @State private var host: String = ""
+    @EnvironmentObject private var client: MirrorClient
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        if client.hasFirstFrame {
-            videoSurface
-        } else {
-            connectForm
-        }
-    }
-
-    private var connectForm: some View {
-        VStack(spacing: 20) {
-            Text("Connect to Mac").font(.title)
-            TextField("Mac IP (e.g. 192.168.1.42)", text: $host)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 320)
-            Button("Connect") {
-                client.connect(host: host)
-            }
-            .disabled(host.isEmpty)
+        VStack(spacing: 24) {
+            Text("Interactive Screen Mirror").font(.largeTitle)
             Text(client.connectionState).foregroundStyle(.secondary)
+
+            if client.streamIDs.isEmpty {
+                ProgressView().padding(.top, 12)
+                Text("Looking for a Mac on this network…")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(client.streamIDs, id: \.self) { id in
+                    Button {
+                        openWindow(id: "stream", value: id)
+                    } label: {
+                        Label("Open display \(id + 1)", systemImage: "display")
+                            .frame(maxWidth: 320)
+                    }
+                }
+            }
         }
         .padding(40)
+        .onAppear { client.start() }
     }
+}
 
-    private var videoSurface: some View {
+/// One virtual monitor in its own window. Drag it anywhere in space.
+struct StreamView: View {
+    let streamID: UInt8
+    @EnvironmentObject private var client: MirrorClient
+
+    var body: some View {
+        let stream = client.state(for: streamID)
         GeometryReader { geo in
-            let viewSize = aspectFit(container: geo.size, aspect: client.sourceAspect)
+            let size = aspectFit(container: geo.size, aspect: stream.aspect)
             ZStack {
-                DisplayLayerView(layer: client.displayLayer)
-                    .frame(width: viewSize.width, height: viewSize.height)
+                DisplayLayerView(layer: stream.layer)
+                    .frame(width: size.width, height: size.height)
                     .gesture(
-                        SpatialTapGesture()
-                            .onEnded { event in
-                                let p = event.location
-                                let nx = max(0, min(1, p.x / viewSize.width))
-                                let ny = max(0, min(1, p.y / viewSize.height))
-                                client.sendClick(normalizedX: Double(nx), normalizedY: Double(ny))
-                            }
+                        SpatialTapGesture().onEnded { event in
+                            let nx = max(0, min(1, event.location.x / size.width))
+                            let ny = max(0, min(1, event.location.y / size.height))
+                            client.sendClick(stream: streamID, nx: Double(nx), ny: Double(ny))
+                        }
                     )
+                if !stream.hasFrame {
+                    ProgressView("Waiting for display \(streamID + 1)…")
+                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
     }
 
     private func aspectFit(container: CGSize, aspect: CGFloat) -> CGSize {
-        let containerAspect = container.width / container.height
-        if containerAspect > aspect {
-            return CGSize(width: container.height * aspect, height: container.height)
-        } else {
-            return CGSize(width: container.width, height: container.width / aspect)
-        }
+        guard aspect > 0, container.width > 0, container.height > 0 else { return container }
+        return container.width / container.height > aspect
+            ? CGSize(width: container.height * aspect, height: container.height)
+            : CGSize(width: container.width, height: container.width / aspect)
     }
 }
 

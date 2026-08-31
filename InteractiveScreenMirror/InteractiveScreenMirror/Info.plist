@@ -6,7 +6,7 @@
 	<string></string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_ism._tcp</string>
+		<string>_ism._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connects to your Mac on the local network to mirror its display.</string>

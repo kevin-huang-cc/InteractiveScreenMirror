@@ -2,47 +2,77 @@ import Foundation
 import ScreenCaptureKit
 import CoreMedia
 
+/// Captures one display and encodes it. One instance per virtual monitor.
 final class ScreenCapturer: NSObject, SCStreamOutput {
+    let streamID: UInt8
+    private let displayID: CGDirectDisplayID
     private var stream: SCStream?
     private var encoder: VideoEncoder?
-    private(set) var sourceWidth: Int = 0
-    private(set) var sourceHeight: Int = 0
+    private var dropped = 0
 
-    var onParameterSets: (Data) -> Void = { _ in }
-    var onFrame: (Data) -> Void = { _ in }
+    var onParameterSets: (UInt8, Data) -> Void = { _, _ in }
+    var onFrame: (UInt8, Data, Bool) -> Void = { _, _, _ in }
+
+    init(streamID: UInt8, displayID: CGDirectDisplayID) {
+        self.streamID = streamID
+        self.displayID = displayID
+        super.init()
+    }
 
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first else {
-            throw NSError(domain: "ISM", code: 1, userInfo: [NSLocalizedDescriptionKey: "no display"])
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            throw NSError(domain: "ISM", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "display \(displayID) not visible to ScreenCaptureKit"])
         }
-        sourceWidth = display.width
-        sourceHeight = display.height
 
         let enc = try VideoEncoder(width: display.width, height: display.height)
-        enc.onParameterSets = { [weak self] in self?.onParameterSets($0) }
-        enc.onFrame = { [weak self] in self?.onFrame($0) }
+        enc.onParameterSets = { [weak self] in
+            guard let self else { return }
+            self.onParameterSets(self.streamID, $0)
+        }
+        enc.onFrame = { [weak self] data, key in
+            guard let self else { return }
+            self.onFrame(self.streamID, data, key)
+        }
         encoder = enc
 
-        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let cfg = SCStreamConfiguration()
         cfg.width = display.width
         cfg.height = display.height
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        cfg.queueDepth = 5
+        // 3 is the SCK minimum for realtime. The previous 5 held ~83ms of
+        // frames in front of the encoder for no benefit.
+        cfg.queueDepth = 3
         cfg.showsCursor = true
 
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
-        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "ism.capture"))
+        try s.addStreamOutput(self, type: .screen,
+                              sampleHandlerQueue: DispatchQueue(label: "ism.capture.\(streamID)"))
         try await s.startCapture()
         stream = s
     }
 
+    func requestKeyframe() { encoder?.requestKeyframe() }
+
+    func stop() async {
+        try? await stream?.stopCapture()
+        stream = nil
+    }
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sampleBuffer.isValid,
-              let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        encoder?.encode(pixelBuffer: pb, pts: pts)
+              let pb = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let enc = encoder else { return }
+        // Drop rather than queue when the encoder is behind: a late frame is
+        // worth less than a fresh one, and queueing only grows the lag.
+        guard !enc.isBusy else {
+            dropped += 1
+            if dropped % 60 == 0 { NSLog("[ISM] stream \(streamID): dropped \(dropped) frames (encoder busy)") }
+            return
+        }
+        enc.encode(pixelBuffer: pb, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
     }
 }

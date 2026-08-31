@@ -2,50 +2,49 @@ import Cocoa
 import ApplicationServices
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var capturer: ScreenCapturer!
+    private let displays = VirtualDisplayManager()
+    private var capturers: [ScreenCapturer] = []
     private var server: Server!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         promptAccessibilityIfNeeded()
 
+        let screens = displays.createAll(ScreenSpec.defaults)
+        guard !screens.isEmpty else {
+            NSLog("[ISM] no virtual displays created — check ISMPrivate.h against tools/probe.m")
+            return
+        }
+
         server = Server()
-        capturer = ScreenCapturer()
-        capturer.onParameterSets = { [weak self] in self?.server.sendParameterSets($0) }
-        capturer.onFrame = { [weak self] in self?.server.sendFrame($0) }
+        server.onKeyframeRequest = { [weak self] stream in
+            self?.capturers.first { $0.streamID == stream }?.requestKeyframe()
+        }
 
         Task {
+            for screen in screens {
+                let cap = ScreenCapturer(streamID: screen.streamID, displayID: screen.displayID)
+                cap.onParameterSets = { [weak self] id, data in self?.server.sendParameterSets(id, data) }
+                cap.onFrame = { [weak self] id, data, key in self?.server.sendFrame(id, data, isKeyframe: key) }
+                do {
+                    try await cap.start()
+                    capturers.append(cap)
+                    NSLog("[ISM] capturing stream \(screen.streamID) (\(screen.width)x\(screen.height))")
+                } catch {
+                    NSLog("[ISM] capture failed for stream \(screen.streamID): \(error)")
+                }
+            }
             do {
-                try await capturer.start()
-                server.updateSourceSize(width: capturer.sourceWidth, height: capturer.sourceHeight)
-                try server.start(port: 7777)
-                logLocalAddresses()
+                try server.start(screens: screens)
             } catch {
-                NSLog("startup failed: \(error)")
+                NSLog("[ISM] server failed to start: \(error)")
             }
         }
     }
 
     private func promptAccessibilityIfNeeded() {
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        let trusted = AXIsProcessTrustedWithOptions(opts)
-        if !trusted {
-            NSLog("Accessibility not granted yet — clicks will no-op until you enable it in System Settings.")
-        }
-    }
-
-    private func logLocalAddresses() {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return }
-        defer { freeifaddrs(ifaddr) }
-        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let addr = ptr.pointee.ifa_addr.pointee
-            guard addr.sa_family == UInt8(AF_INET) else { continue }
-            let name = String(cString: ptr.pointee.ifa_name)
-            guard name.hasPrefix("en") else { continue }
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(ptr.pointee.ifa_addr, socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
-                        &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
-            NSLog("LISTENING on \(name): \(String(cString: host)):7777")
+        if !AXIsProcessTrustedWithOptions(opts) {
+            NSLog("[ISM] Accessibility not granted — clicks will no-op until enabled in System Settings.")
         }
     }
 }

@@ -4,3 +4,6 @@ xcuserdata/
 build/
 DerivedData/
 .swiftpm/
+tools/wirecheck
+tools/probe
+tools/*.dSYM/
