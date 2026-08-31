@@ -38,7 +38,18 @@ struct StreamView: View {
     @EnvironmentObject private var client: MirrorClient
 
     var body: some View {
-        let stream = client.state(for: streamID)
+        // StreamState must be observed here, not just read. Reading it inline
+        // meant `hasFrame` flipping never invalidated the view, so the
+        // "Waiting for display" spinner stayed up over live video.
+        StreamSurface(stream: client.state(for: streamID), client: client)
+    }
+}
+
+private struct StreamSurface: View {
+    @ObservedObject var stream: StreamState
+    let client: MirrorClient
+
+    var body: some View {
         GeometryReader { geo in
             let size = aspectFit(container: geo.size, aspect: stream.aspect)
             ZStack {
@@ -48,11 +59,11 @@ struct StreamView: View {
                         SpatialTapGesture().onEnded { event in
                             let nx = max(0, min(1, event.location.x / size.width))
                             let ny = max(0, min(1, event.location.y / size.height))
-                            client.sendClick(stream: streamID, nx: Double(nx), ny: Double(ny))
+                            client.sendClick(stream: stream.id, nx: Double(nx), ny: Double(ny))
                         }
                     )
                 if !stream.hasFrame {
-                    ProgressView("Waiting for display \(streamID + 1)…")
+                    ProgressView("Waiting for display \(stream.id + 1)…")
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)

@@ -15,6 +15,9 @@ final class Server {
 
     private var screens: [VirtualScreen] = []
     private var msgIDs: [UInt8: UInt32] = [:]
+    /// Cached per stream so a client connecting after the initial IDR can start
+    /// decoding immediately instead of waiting for the next keyframe.
+    private var lastParams: [UInt8: Data] = [:]
     private var seenClicks: Set<UInt64> = []
     private var clickOrder: [UInt64] = []
 
@@ -71,7 +74,10 @@ final class Server {
     // MARK: outbound
 
     func sendParameterSets(_ stream: UInt8, _ data: Data) {
-        queue.async { self.emit(.param, stream: stream, data) }
+        queue.async {
+            self.lastParams[stream] = data
+            self.emit(.param, stream: stream, data)
+        }
     }
 
     func sendFrame(_ stream: UInt8, _ data: Data, isKeyframe: Bool) {
@@ -103,7 +109,13 @@ final class Server {
     private func handle(_ h: Wire.Header, _ payload: Data) {
         switch h.type {
         case .hello:
+            // A new client has no reference frame and no parameter sets. Under
+            // low-latency rate control the encoder emits an IDR at startup and
+            // then only on request, so ask for one explicitly rather than
+            // waiting out a GOP that may never come.
             sendMeta()
+            for (stream, params) in lastParams { emit(.param, stream: stream, params) }
+            for screen in screens { onKeyframeRequest(screen.streamID) }
         case .keyframeReq:
             onKeyframeRequest(h.stream)
         case .click:
