@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Lobby window: lists the Mac's virtual monitors, opens one window each.
+/// Lobby window: lists the Mac's virtual monitors and toggles each one in the
+/// immersive space.
 struct ContentView: View {
     @EnvironmentObject private var client: MirrorClient
-    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openImmersiveSpace) private var openSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissSpace
 
     var body: some View {
         VStack(spacing: 24) {
@@ -16,48 +18,42 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 ForEach(client.streamIDs, id: \.self) { id in
-                    Button {
-                        openWindow(id: "stream", value: id)
-                    } label: {
-                        Label("Open display \(id + 1)", systemImage: "display")
-                            .frame(maxWidth: 320)
-                    }
+                    StreamToggle(stream: client.state(for: id)) { show(id) }
+                }
+                if client.spaceVisible {
+                    Button("Hide all displays") { Task { await dismissSpace() } }
                 }
             }
         }
         .padding(40)
         .onAppear { client.start() }
+        // Screens left open last time come back when the Mac shows up.
+        .onChange(of: client.streamIDs) { _, ids in
+            if ids.contains(where: { client.state(for: $0).isOpen }) { ensureSpace() }
+        }
+    }
+
+    private func show(_ id: UInt8) {
+        let s = client.state(for: id)
+        s.isOpen.toggle()
+        if s.isOpen { ensureSpace() }
+    }
+
+    private func ensureSpace() {
+        guard !client.spaceVisible else { return }
+        Task { await openSpace(id: "screens") }
     }
 }
 
-/// One virtual monitor in its own volume. Drag it anywhere in space.
-struct StreamView: View {
-    let streamID: UInt8
-    @EnvironmentObject private var client: MirrorClient
-
-    var body: some View {
-        // StreamState must be observed here, not just read. Reading it inline
-        // meant `hasFrame` flipping never invalidated the view, so the
-        // "Waiting for display" spinner stayed up over live video.
-        StreamVolume(stream: client.state(for: streamID), client: client)
-    }
-}
-
-/// Sizes the volume from the zoom slider: volumes have no system zoom gesture,
-/// so the content declares its size in metres and the window follows.
-private struct StreamVolume: View {
+private struct StreamToggle: View {
     @ObservedObject var stream: StreamState
-    let client: MirrorClient
-    @PhysicalMetric(from: .meters) private var meter: CGFloat = 1
+    let action: () -> Void
 
     var body: some View {
-        let w = 1.3 * meter * stream.zoom
-        let h = w / stream.aspect
-        CurvedStreamView(stream: stream, client: client)
-            .volumeBaseplateVisibility(.hidden)
-            .frame(width: w, height: h)
-            // Depth = height so the screen fits when tilted flat; the curve's
-            // bow needs less than that.
-            .frame(depth: h)
+        Button(action: action) {
+            Label(stream.isOpen ? "Hide display \(stream.id + 1)" : "Show display \(stream.id + 1)",
+                  systemImage: stream.isOpen ? "display.trianglebadge.exclamationmark" : "display")
+                .frame(maxWidth: 320)
+        }
     }
 }

@@ -59,13 +59,29 @@ switching never changes the window's shape. Picking one reconfigures the Mac
 display and rebuilds that stream's capture and encoder (a
 `VTCompressionSession` is fixed at its creation size).
 
-## Curvature
+## Curvature, placement and controls
 
-Each stream is a volumetric window containing a cylinder-section mesh textured
-from the decoder via `TextureResource.DrawableQueue`. The bottom ornament has
-a curve slider (wrap angle, 0 = flat, ~1.2 rad matches Apple's ultrawide). Arc
-length is held fixed as the angle grows, so the screen wraps toward you the way
-Mac Virtual Display does when zoomed — except here you set it directly.
+All displays live in one mixed-immersion `ImmersiveSpace`. Volumes were tried
+first, but visionOS dims whichever window sits behind another and boxes a
+curved screen inside a fixed depth. In the space nothing dims, screens overlap
+freely, and the chrome is ours:
+
+- **Grab bar** under each screen: pinch-drag to move. On release the screen
+  turns to face you, like a system window.
+- **Corner knob**: drag outward to enlarge, inward to shrink.
+- **Panel** beside each screen: Curve (wrap angle, 0 = flat, ~1.2 rad matches
+  Apple's ultrawide), Zoom, Tilt (0 upright to 90° flat on a desk), resolution
+  picker, close.
+- Position, yaw, curve, zoom, tilt and open state persist per display in
+  `UserDefaults`. A display shown for the first time appears 1.5 m ahead at
+  eye height.
+
+Each screen is a cylinder-section mesh textured from the decoder via
+`TextureResource.DrawableQueue`. Arc length is held fixed as the angle grows,
+so the screen wraps toward you the way Mac Virtual Display does when zoomed.
+Taps are mapped back to display coordinates through the exact inverse of the
+mesh parameterisation in the screen's own space, so clicks land where you
+pinch at any curve or tilt.
 
 How Apple does it (from the visionOS 27 simulator runtime, not source): the
 curve is applied by the system compositor, not the app. SpringBoard's
@@ -74,9 +90,6 @@ radius from the window width between a min/max width; RealityKit's
 `UICurvatureComponent` bends the window layer onto that cylinder. Apps opt in
 through MRUIKit's private `preferredWindowCurvature` on `UIWindowScene`, which
 is Apple-only in visionOS 27, hence the mesh here.
-
-Taps are mapped back to display coordinates with the exact inverse of the mesh
-parameterisation, so clicks land where you pinch on the curved surface.
 
 ## Configuring virtual displays
 

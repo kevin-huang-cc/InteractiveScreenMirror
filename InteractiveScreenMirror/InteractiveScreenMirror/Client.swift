@@ -16,12 +16,43 @@ final class StreamState: ObservableObject, Identifiable {
     @Published var curvature: Float = 0.8
     /// Radians about the horizontal axis. 0 upright, π/2 lying flat facing up.
     @Published var tilt: Float = 0
-    /// Volume size multiplier; 1 is a 1.3 m wide screen.
-    @Published var zoom: CGFloat = 1
+    /// Size multiplier; 1 is a 1.3 m wide screen.
+    @Published var zoom: Float = 1
+    /// Placement in the immersive space, metres from where the app launched.
+    @Published var isOpen = false
+    @Published var position = SIMD3<Float>(0, 1.3, -1.5)
+    @Published var yaw: Float = 0
+    /// False until the screen has been placed once, so it can spawn ahead of you.
+    @Published var placed = false
     let screen = ScreenTexture()
     let decoder = VideoDecoder()
+    private var saver: AnyCancellable?
 
-    init(id: UInt8) { self.id = id }
+    init(id: UInt8) {
+        self.id = id
+        if let d = UserDefaults.standard.data(forKey: key),
+           let s = try? JSONDecoder().decode(Saved.self, from: d) {
+            curvature = s.curvature; tilt = s.tilt; zoom = s.zoom
+            isOpen = s.isOpen; position = SIMD3(s.pos[0], s.pos[1], s.pos[2]); yaw = s.yaw
+            placed = s.placed ?? true
+        }
+        // objectWillChange fires before the write; by the time the debounce
+        // elapses every field is current.
+        saver = objectWillChange
+            .debounce(for: .seconds(0.5), scheduler: DispatchQueue.main)
+            .sink { [weak self] in self?.save() }
+    }
+
+    private var key: String { "screen.\(id)" }
+    private struct Saved: Codable {
+        var curvature: Float, tilt: Float, zoom: Float, isOpen: Bool, pos: [Float], yaw: Float
+        var placed: Bool?
+    }
+    private func save() {
+        let s = Saved(curvature: curvature, tilt: tilt, zoom: zoom, isOpen: isOpen,
+                      pos: [position.x, position.y, position.z], yaw: yaw, placed: placed)
+        UserDefaults.standard.set(try? JSONEncoder().encode(s), forKey: key)
+    }
 }
 
 final class MirrorClient: ObservableObject {
@@ -29,6 +60,8 @@ final class MirrorClient: ObservableObject {
 
     @Published var connectionState = "searching…"
     @Published var streamIDs: [UInt8] = []
+    /// Set by the immersive space itself, so the Crown closing it is seen too.
+    @Published var spaceVisible = false
 
     private var states: [UInt8: StreamState] = [:]
     private var connection: NWConnection?
@@ -37,6 +70,12 @@ final class MirrorClient: ObservableObject {
     private let queue = DispatchQueue(label: "ism.client")
     private var clickSeq: UInt32 = 0
     private let statesLock = NSLock()
+    private var forwarders: [AnyCancellable] = []
+
+    /// Streams currently shown in the immersive space, in id order.
+    var openStreams: [StreamState] {
+        streamIDs.map { state(for: $0) }.filter(\.isOpen)
+    }
 
     private init() {
         reassembler.onMessage = { [weak self] h, payload in self?.handle(h, payload) }
@@ -54,6 +93,11 @@ final class MirrorClient: ObservableObject {
         if let s = states[id] { return s }
         let s = StreamState(id: id)
         states[id] = s
+        // One RealityView draws every screen, so any stream change must
+        // invalidate the client it observes.
+        forwarders.append(s.objectWillChange.sink { [weak self] in
+            DispatchQueue.main.async { self?.objectWillChange.send() }
+        })
         s.decoder.onPixelBuffer = { [weak s] pb in
             // Blit on the decoder thread; staying off main keeps frames out of
             // SwiftUI's queue.

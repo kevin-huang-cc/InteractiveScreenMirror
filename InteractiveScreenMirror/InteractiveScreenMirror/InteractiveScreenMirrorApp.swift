@@ -10,15 +10,10 @@ struct InteractiveScreenMirrorApp: App {
         }
         .defaultSize(width: 600, height: 460)
 
-        // One window per virtual monitor, opened on demand.
-        WindowGroup(id: "stream", for: UInt8.self) { $streamID in
-            if let streamID {
-                StreamView(streamID: streamID).environmentObject(client)
-            }
+        // All displays live in one mixed space so none dims the others.
+        ImmersiveSpace(id: "screens") {
+            ScreensSpace().environmentObject(client)
         }
-        .windowStyle(.volumetric)
-        .windowResizability(.contentSize)
-        // Depth is headroom for the curve: a 1.2 m screen at 2.4 rad bows ~0.4 m.
-        .defaultSize(width: 1.3, height: 0.8, depth: 0.5, in: .meters)
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
     }
 }

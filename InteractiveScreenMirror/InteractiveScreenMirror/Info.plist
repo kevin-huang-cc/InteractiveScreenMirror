@@ -22,7 +22,7 @@
 			<array>
 				<dict>
 					<key>UISceneInitialImmersionStyle</key>
-					<string>UIImmersionStyleFull</string>
+					<string>UIImmersionStyleMixed</string>
 				</dict>
 			</array>
 		</dict>
