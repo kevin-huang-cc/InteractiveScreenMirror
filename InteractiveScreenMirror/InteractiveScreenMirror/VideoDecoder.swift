@@ -6,8 +6,10 @@ final class VideoDecoder {
     private var formatDescription: CMVideoFormatDescription?
     private var lastParams: Data?
     private var needsKeyframe = false
+    private var session: VTDecompressionSession?
 
-    var onSampleBuffer: (CMSampleBuffer) -> Void = { _ in }
+    /// Decoded BGRA frames, delivered on VideoToolbox's callback thread.
+    var onPixelBuffer: (CVPixelBuffer) -> Void = { _ in }
 
     var isReady: Bool { formatDescription != nil }
 
@@ -44,14 +46,41 @@ final class VideoDecoder {
                 }
             }
         }
-        if fd != nil {
+        if let fd {
             formatDescription = fd
             lastParams = data
+            rebuildSession(fd)
         }
     }
 
+    /// The display layer used to decode for us; a RealityKit texture needs the
+    /// raw pixels, so decode here. BGRA so the buffer blits straight into a
+    /// Metal drawable without a colour-space pass.
+    private func rebuildSession(_ fd: CMVideoFormatDescription) {
+        if let s = session { VTDecompressionSessionInvalidate(s) }
+        session = nil
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        var cb = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: { refcon, _, status, _, image, _, _ in
+                guard status == noErr, let image, let refcon else { return }
+                Unmanaged<VideoDecoder>.fromOpaque(refcon).takeUnretainedValue().onPixelBuffer(image)
+            },
+            decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque())
+        var s: VTDecompressionSession?
+        VTDecompressionSessionCreate(allocator: nil, formatDescription: fd,
+                                     decoderSpecification: nil,
+                                     imageBufferAttributes: attrs as CFDictionary,
+                                     outputCallback: &cb, decompressionSessionOut: &s)
+        session = s
+    }
+
+    deinit { if let s = session { VTDecompressionSessionInvalidate(s) } }
+
     func handleFrame(_ data: Data) {
-        guard let fd = formatDescription else { return }
+        guard let fd = formatDescription, let session else { return }
         if needsKeyframe {
             guard Self.containsIDR(data) else { return }
             needsKeyframe = false
@@ -84,14 +113,10 @@ final class VideoDecoder {
                 sampleBufferOut: &sampleBuffer) == noErr,
               let sb = sampleBuffer else { return }
 
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
-           CFArrayGetCount(attachments) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict,
-                Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        onSampleBuffer(sb)
+        // No timestamps and no reordering: the encoder emits I/P only, so the
+        // synchronous path returns each frame before the next arrives.
+        VTDecompressionSessionDecodeFrame(session, sampleBuffer: sb, flags: [],
+                                          frameRefcon: nil, infoFlagsOut: nil)
     }
 
     /// Walks the AVCC length-prefixed NAL units looking for an IDR (type 5).

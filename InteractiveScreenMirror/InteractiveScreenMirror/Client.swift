@@ -2,9 +2,8 @@ import Foundation
 import Combine
 import Network
 import CoreMedia
-import AVFoundation
 
-/// One virtual monitor's worth of state: its own decoder and display layer.
+/// One virtual monitor's worth of state: its own decoder and screen texture.
 final class StreamState: ObservableObject, Identifiable {
     let id: UInt8
     @Published var aspect: CGFloat = 16.0 / 9.0
@@ -13,13 +12,16 @@ final class StreamState: ObservableObject, Identifiable {
     @Published var size: CGSize = .zero
     /// Resolutions this display can switch to, widest first.
     @Published var modes: [CGSize] = []
-    let layer = AVSampleBufferDisplayLayer()
+    /// Wrap angle in radians. 0 is flat; Apple's ultrawide is roughly 1.2.
+    @Published var curvature: Float = 0.8
+    /// Radians about the horizontal axis. 0 upright, π/2 lying flat facing up.
+    @Published var tilt: Float = 0
+    /// Volume size multiplier; 1 is a 1.3 m wide screen.
+    @Published var zoom: CGFloat = 1
+    let screen = ScreenTexture()
     let decoder = VideoDecoder()
 
-    init(id: UInt8) {
-        self.id = id
-        layer.videoGravity = .resizeAspect
-    }
+    init(id: UInt8) { self.id = id }
 }
 
 final class MirrorClient: ObservableObject {
@@ -52,10 +54,10 @@ final class MirrorClient: ObservableObject {
         if let s = states[id] { return s }
         let s = StreamState(id: id)
         states[id] = s
-        s.decoder.onSampleBuffer = { [weak s] sb in
-            // AVSampleBufferDisplayLayer.enqueue is thread-safe; staying off the
-            // main thread keeps frames out of SwiftUI's queue.
-            s?.layer.enqueue(sb)
+        s.decoder.onPixelBuffer = { [weak s] pb in
+            // Blit on the decoder thread; staying off main keeps frames out of
+            // SwiftUI's queue.
+            s?.screen.push(pb)
             if s?.hasFrame == false {
                 DispatchQueue.main.async { s?.hasFrame = true }
             }

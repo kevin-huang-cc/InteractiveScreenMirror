@@ -19,7 +19,7 @@ Mac                                              Vision Pro
         |                                               |
   UDP datagrams, fragmented, stream-tagged   ->    VideoDecoder x N
         |                                               |
-  NWListener (Bonjour _ism._udp, peer-to-peer)     AVSampleBufferDisplayLayer x N
+  NWListener (Bonjour _ism._udp, peer-to-peer)     VTDecompressionSession -> RealityKit  
         ^                                               |
         +---- click {stream, x, y} --------------  SpatialTapGesture
 ```
@@ -59,9 +59,24 @@ switching never changes the window's shape. Picking one reconfigures the Mac
 display and rebuilds that stream's capture and encoder (a
 `VTCompressionSession` is fixed at its creation size).
 
-Stream windows use `UIWindowSceneResizingRestrictionsUniform`, so pinch-resize
-scales the window while preserving the display's aspect ratio rather than
-letting you stretch it freeform.
+## Curvature
+
+Each stream is a volumetric window containing a cylinder-section mesh textured
+from the decoder via `TextureResource.DrawableQueue`. The bottom ornament has
+a curve slider (wrap angle, 0 = flat, ~1.2 rad matches Apple's ultrawide). Arc
+length is held fixed as the angle grows, so the screen wraps toward you the way
+Mac Virtual Display does when zoomed — except here you set it directly.
+
+How Apple does it (from the visionOS 27 simulator runtime, not source): the
+curve is applied by the system compositor, not the app. SpringBoard's
+`SFBUISidecarCurveCalculator` interpolates a cylinder radius between a min/max
+radius from the window width between a min/max width; RealityKit's
+`UICurvatureComponent` bends the window layer onto that cylinder. Apps opt in
+through MRUIKit's private `preferredWindowCurvature` on `UIWindowScene`, which
+is Apple-only in visionOS 27, hence the mesh here.
+
+Taps are mapped back to display coordinates with the exact inverse of the mesh
+parameterisation, so clicks land where you pinch on the curved surface.
 
 ## Configuring virtual displays
 
