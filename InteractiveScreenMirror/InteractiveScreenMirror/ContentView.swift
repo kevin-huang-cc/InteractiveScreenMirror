@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 /// Lobby window: lists the Mac's virtual monitors and toggles each one in the
 /// immersive space.
@@ -6,6 +7,10 @@ struct ContentView: View {
     @EnvironmentObject private var client: MirrorClient
     @Environment(\.openImmersiveSpace) private var openSpace
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
+    @AppStorage("backdrop") private var backdrop = Backdrop.none.rawValue
+    @AppStorage("backdropVersion") private var backdropVersion = 0
+    @State private var photoPick: PhotosPickerItem?
+    @State private var showPresets = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -20,6 +25,7 @@ struct ContentView: View {
                 ForEach(client.streamIDs, id: \.self) { id in
                     StreamToggle(stream: client.state(for: id)) { show(id) }
                 }
+                environmentPicker
                 if client.spaceVisible {
                     Button("Hide all displays") { Task { await dismissSpace() } }
                 }
@@ -31,6 +37,48 @@ struct ContentView: View {
         .onChange(of: client.streamIDs) { _, ids in
             if ids.contains(where: { client.state(for: $0).isOpen }) { ensureSpace() }
         }
+    }
+
+    /// None, a preset (opens a second row), or a 360° photo from the library.
+    private var environmentPicker: some View {
+        let current = Backdrop(rawValue: backdrop) ?? .none
+        return VStack(spacing: 10) {
+            HStack {
+                choice("None", selected: current == .none) { backdrop = Backdrop.none.rawValue; showPresets = false }
+                choice("Presets", selected: current.isPreset) { showPresets.toggle() }
+                choice("Photo", selected: current == .photo) { backdrop = Backdrop.photo.rawValue; showPresets = false }
+                PhotosPicker(selection: $photoPick, matching: .panoramas) {
+                    Image(systemName: "photo.badge.plus")
+                }
+                .buttonBorderShape(.circle)
+            }
+            if showPresets {
+                HStack {
+                    ForEach(Backdrop.presets, id: \.rawValue) { p in
+                        choice(p.label, selected: current == p) { backdrop = p.rawValue }
+                    }
+                }
+            }
+        }
+        .onAppear { showPresets = current.isPreset }
+        .onChange(of: photoPick) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    try? data.write(to: Backdrop.photoURL, options: .atomic)
+                    backdropVersion += 1
+                    backdrop = Backdrop.photo.rawValue
+                    showPresets = false
+                }
+                photoPick = nil
+            }
+        }
+    }
+
+    private func choice(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.bordered)
+            .tint(selected ? .accentColor : nil)
     }
 
     private func show(_ id: UInt8) {

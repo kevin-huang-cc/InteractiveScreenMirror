@@ -92,6 +92,18 @@ radius from the window width between a min/max width; RealityKit's
 through MRUIKit's private `preferredWindowCurvature` on `UIWindowScene`, which
 is Apple-only in visionOS 27, hence the mesh here.
 
+## Environments
+
+Apple's environments cannot appear behind a third-party immersive space (they
+are MobileAssets behind a private framework), so the app brings its own. The
+lobby has an Environment picker: None (passthrough), Presets, or Photo (any
+360° panorama from the library, kept in Documents). Presets opens a second row:
+Studio (a generated dark gradient) and Matrix (digital rain, a Metal compute
+kernel redrawing the skybox every frame; compiled from source at runtime so no
+Metal toolchain is needed).
+With a backdrop chosen the space switches to progressive immersion, so the
+Digital Crown dials passthrough against the skybox; the level is remembered.
+
 ## Main display
 
 At launch the Mac app arranges the first virtual display at the origin, which

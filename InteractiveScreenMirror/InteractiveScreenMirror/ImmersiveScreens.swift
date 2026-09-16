@@ -9,6 +9,10 @@ import ARKit
 struct ScreensSpace: View {
     @EnvironmentObject private var client: MirrorClient
     @State private var rig = Rig()
+    @AppStorage("backdrop") private var backdrop = Backdrop.none.rawValue
+    /// Bumped when a new photo is saved so the same `.photo` value reloads.
+    @AppStorage("backdropVersion") private var backdropVersion = 0
+    @AppStorage("immersion") private var immersion = 0.6
 
     /// Per-screen entities plus drag bookkeeping. Reference type so the
     /// RealityView update closure can mutate it freely.
@@ -29,6 +33,10 @@ struct ScreensSpace: View {
         }
         var items: [UInt8: Item] = [:]
         var dragStart: (position: SIMD3<Float>, zoom: Float, yaw: Float)?
+        var sky: ModelEntity?
+        var skyKey = ""
+        var animatedSky: AnimatedSky?
+        var skyTick: EventSubscription?
         let session = ARKitSession()
         let world = WorldTrackingProvider()
 
@@ -47,6 +55,7 @@ struct ScreensSpace: View {
             Task { try? await rig.session.run([rig.world]) }
         } update: { content, attachments in
             sync(content, attachments)
+            syncBackdrop(content)
         } attachments: {
             ForEach(client.openStreams) { stream in
                 Attachment(id: stream.id) {
@@ -61,6 +70,8 @@ struct ScreensSpace: View {
         }
         .onAppear { client.spaceVisible = true }
         .onDisappear { client.spaceVisible = false }
+        // Remember where the Crown left the dial.
+        .onImmersionChange { _, new in if let a = new.amount { immersion = a } }
         .gesture(SpatialTapGesture().targetedToAnyEntity().onEnded { value in
             guard let (id, role) = Self.parse(value.entity.name), role == "screen",
                   let item = rig.items[id] else { return }
@@ -93,6 +104,36 @@ struct ScreensSpace: View {
                 }
             }
             .onEnded { _ in rig.dragStart = nil })
+    }
+
+    /// Swap the skybox when the choice (or the photo behind it) changes.
+    private func syncBackdrop(_ content: RealityViewContent) {
+        let key = "\(backdrop)#\(backdropVersion)"
+        guard key != rig.skyKey else { return }
+        rig.skyKey = key
+        rig.sky?.removeFromParent()
+        rig.sky = nil
+        rig.skyTick?.cancel()
+        rig.skyTick = nil
+        rig.animatedSky = nil
+        let choice = Backdrop(rawValue: backdrop) ?? .none
+        if choice == .matrix {
+            guard let anim = AnimatedSky(kernel: "matrixRain", source: matrixRainSource) else { return }
+            rig.animatedSky = anim
+            let sky = Backdrop.skybox(anim.texture)
+            content.add(sky)
+            rig.sky = sky
+            rig.skyTick = content.subscribe(to: SceneEvents.Update.self) { _ in anim.render() }
+            return
+        }
+        // TextureResource creation is main-actor bound; a photo decodes in well
+        // under a frame's worth of visible hitch, so do it here rather than fight it.
+        Task { @MainActor in
+            guard let tex = choice.texture(), rig.skyKey == key else { return }
+            let sky = Backdrop.skybox(tex)
+            content.add(sky)
+            rig.sky = sky
+        }
     }
 
     private static func parse(_ name: String) -> (UInt8, String)? {
