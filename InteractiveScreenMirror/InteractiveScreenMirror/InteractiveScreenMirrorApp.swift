@@ -3,6 +3,8 @@ import SwiftUI
 @main
 struct InteractiveScreenMirrorApp: App {
     @StateObject private var client = MirrorClient.shared
+    /// Whether real hands are cut out in front of the screens. Space-wide.
+    @AppStorage("handsVisible") private var handsVisible = true
 
     var body: some Scene {
         WindowGroup {
@@ -15,5 +17,6 @@ struct InteractiveScreenMirrorApp: App {
             ScreensSpace().environmentObject(client)
         }
         .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .upperLimbVisibility(handsVisible ? .visible : .hidden)
     }
 }

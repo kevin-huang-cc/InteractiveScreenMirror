@@ -189,12 +189,18 @@ struct ScreenPanel: View {
     @ObservedObject var stream: StreamState
     let client: MirrorClient
     let faceMe: () -> Void
+    @AppStorage("handsVisible") private var handsVisible = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Display \(stream.id + 1)").font(.headline)
                 Spacer()
+                // Hands in front of the screens, or screens drawn over the hands.
+                Button { handsVisible.toggle() } label: {
+                    Image(systemName: handsVisible ? "hand.raised.fill" : "hand.raised.slash")
+                }
+                .buttonBorderShape(.circle)
                 Button { stream.isOpen = false } label: { Image(systemName: "xmark") }
                     .buttonBorderShape(.circle)
             }
