@@ -20,11 +20,15 @@ struct ScreensSpace: View {
                                   materials: [SimpleMaterial(color: .white, isMetallic: false)])
             let knob = ModelEntity(mesh: .generateSphere(radius: 0.014),
                                    materials: [SimpleMaterial(color: .white, isMetallic: false)])
+            let spin = ModelEntity(mesh: .generateBox(width: 0.028, height: 0.028, depth: 0.012, cornerRadius: 0.006),
+                                   materials: [SimpleMaterial(color: .white, isMetallic: false)])
             var layoutKey = SIMD3<Float>()   // (width, height, angle) last built
             var dims: SIMD3<Float> { layoutKey }
+            /// Half the chord and the sagitta of the current curve, for chrome placement.
+            var edge: (x: Float, z: Float) = (0, 0)
         }
         var items: [UInt8: Item] = [:]
-        var dragStart: (position: SIMD3<Float>, zoom: Float)?
+        var dragStart: (position: SIMD3<Float>, zoom: Float, yaw: Float)?
         let session = ARKitSession()
         let world = WorldTrackingProvider()
 
@@ -46,7 +50,12 @@ struct ScreensSpace: View {
         } attachments: {
             ForEach(client.openStreams) { stream in
                 Attachment(id: stream.id) {
-                    ScreenPanel(stream: stream, client: client)
+                    ScreenPanel(stream: stream, client: client) {
+                        if let head = rig.head {
+                            let d = head.position - stream.position
+                            stream.yaw = atan2(d.x, d.z)
+                        }
+                    }
                 }
             }
         }
@@ -65,7 +74,7 @@ struct ScreensSpace: View {
                 guard let (id, role) = Self.parse(value.entity.name),
                       let item = rig.items[id] else { return }
                 let stream = client.state(for: id)
-                if rig.dragStart == nil { rig.dragStart = (stream.position, stream.zoom) }
+                if rig.dragStart == nil { rig.dragStart = (stream.position, stream.zoom, stream.yaw) }
                 guard let start = rig.dragStart else { return }
                 let t = value.convert(value.translation3D, from: .local, to: .scene)
                 switch role {
@@ -76,19 +85,14 @@ struct ScreensSpace: View {
                     // Pull the corner outward to grow. 0.65 m of drag doubles a 1× screen.
                     let out = simd_dot(t, item.root.orientation.act([1, -1, 0]) / sqrt(2))
                     stream.zoom = min(3, max(0.4, start.zoom + out / 0.65))
+                case "spin":
+                    // Sideways drag along the screen's own x axis; 0.5 m = a quarter turn.
+                    let side = simd_dot(t, item.root.orientation.act([1, 0, 0]))
+                    stream.yaw = start.yaw + side * (.pi / 2) / 0.5
                 default: break
                 }
             }
-            .onEnded { value in
-                defer { rig.dragStart = nil }
-                guard let (id, role) = Self.parse(value.entity.name), role == "bar" else { return }
-                let stream = client.state(for: id)
-                // Like system windows, turn to face you once you let go.
-                if let head = rig.head {
-                    let d = head.position - stream.position
-                    stream.yaw = atan2(d.x, d.z)
-                }
-            })
+            .onEnded { _ in rig.dragStart = nil })
     }
 
     private static func parse(_ name: String) -> (UInt8, String)? {
@@ -112,9 +116,11 @@ struct ScreensSpace: View {
             item.screen.orientation = simd_quatf(angle: -stream.tilt, axis: [1, 0, 0])
             layout(stream, item)
             if let panel = attachments.entity(for: stream.id) {
-                item.root.addChild(panel)
-                panel.position = [-(item.dims.x / 2 + 0.2), 0, 0.02]
-                panel.orientation = simd_quatf(angle: 0.35, axis: [0, 1, 0])
+                // Child of the screen: tilts and turns with it. Sits just past
+                // the left edge, which on a curve is the point nearest you.
+                item.screen.addChild(panel)
+                panel.position = [-(item.edge.x + 0.2), 0, item.edge.z + 0.02]
+                panel.orientation = simd_quatf(angle: 0.35 + stream.curvature / 2, axis: [0, 1, 0])
                 panel.scale = .init(repeating: 1.5)   // attachments default to 1360 pt/m
             }
         }
@@ -135,13 +141,21 @@ struct ScreensSpace: View {
         item.screen.name = "screen-\(stream.id)"
         item.bar.name = "bar-\(stream.id)"
         item.knob.name = "knob-\(stream.id)"
-        for e in [item.screen, item.bar, item.knob] as [ModelEntity] {
+        item.spin.name = "spin-\(stream.id)"
+        for e in [item.screen, item.bar, item.knob, item.spin] as [ModelEntity] {
             e.components.set(InputTargetComponent())
-            e.components.set(HoverEffectComponent())
-            item.root.addChild(e)
+            // Hover glow on the handles only; on the screen it greyed the video.
+            if e !== item.screen { e.components.set(HoverEffectComponent()) }
         }
+        item.root.addChild(item.screen)
+        // Children of the screen, so they tilt with it instead of ending up
+        // underneath a flat display.
+        item.screen.addChild(item.bar)
+        item.screen.addChild(item.knob)
+        item.screen.addChild(item.spin)
         item.bar.generateCollisionShapes(recursive: false)
         item.knob.generateCollisionShapes(recursive: false)
+        item.spin.generateCollisionShapes(recursive: false)
         content.add(item.root)
         rig.items[stream.id] = item
         return item
@@ -155,8 +169,12 @@ struct ScreensSpace: View {
         item.layoutKey = key
         let mesh = Screen.mesh(width: w, height: h, angle: stream.curvature)
         item.screen.model?.mesh = mesh
-        item.bar.position = [0, -h / 2 - 0.05, 0]
-        item.knob.position = [w / 2 + 0.03, -h / 2 - 0.03, 0]
+        let r = Screen.radius(width: w, angle: stream.curvature)
+        let sag = Screen.sagitta(width: w, angle: stream.curvature)
+        item.edge = (r > 0 ? r * sin(stream.curvature / 2) : w / 2, sag / 2)
+        item.bar.position = [0, -h / 2 - 0.05, -sag / 2]
+        item.knob.position = [item.edge.x + 0.03, -h / 2 - 0.03, item.edge.z]
+        item.spin.position = [-item.edge.x - 0.03, -h / 2 - 0.03, item.edge.z]
         let screen = item.screen
         Task { @MainActor in
             if let shape = try? await ShapeResource.generateStaticMesh(from: mesh) {
@@ -170,6 +188,7 @@ struct ScreensSpace: View {
 struct ScreenPanel: View {
     @ObservedObject var stream: StreamState
     let client: MirrorClient
+    let faceMe: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -185,6 +204,7 @@ struct ScreenPanel: View {
             Slider(value: $stream.zoom, in: 0.4...3)
             Label("Tilt", systemImage: "rotate.3d")
             Slider(value: $stream.tilt, in: 0...(.pi / 2))
+            Button("Face me", systemImage: "person.and.arrow.left.and.arrow.right", action: faceMe)
             if !stream.hasFrame { ProgressView("Waiting for display…") }
             resolutionPicker
         }

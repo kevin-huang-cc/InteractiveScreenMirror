@@ -46,11 +46,20 @@ final class VideoEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
         // Text is the worst case for H.264 4:2:0 — sharp edges and high
         // frequency detail. Scale bitrate with pixels rather than fixing it.
-        let bitrate = min(60_000_000, max(12_000_000, width * height * fps / 12))
+        nominalBitrate = min(60_000_000, max(12_000_000, width * height * fps / 12))
+        setBitrate(nominalBitrate)
+        VTCompressionSessionPrepareToEncodeFrames(session)
+    }
+
+    /// What this stream would use alone. The budget caps it when others share the link.
+    let nominalBitrate: Int
+
+    /// Safe to call while encoding; the rate controller picks it up on the next frame.
+    func setBitrate(_ bitrate: Int) {
+        guard let session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
                              value: [NSNumber(value: bitrate * 3 / 2 / 8), NSNumber(value: 1)] as CFArray)
-        VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
     /// True if the encoder is backed up; the caller should drop this frame

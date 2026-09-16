@@ -64,6 +64,34 @@ final class VirtualDisplayManager {
         return screens
     }
 
+    /// Puts the first virtual display at the origin, which is what macOS calls
+    /// the main display (menu bar, Dock, new windows), lines the others up to
+    /// its right, and parks the built-in panels underneath. Session-scoped, so
+    /// the arrangement reverts when the virtual displays disappear at quit.
+    func makeFirstMain() {
+        guard let first = screens.first else { return }
+        var cfg: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&cfg) == .success, let cfg else { return }
+        var x: Int32 = 0
+        for s in screens {
+            CGConfigureDisplayOrigin(cfg, s.displayID, x, 0)
+            x += Int32(CGDisplayBounds(s.displayID).width)
+        }
+        // Everything that is not ours goes below the main display.
+        var count: UInt32 = 0
+        CGGetOnlineDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetOnlineDisplayList(count, &ids, &count)
+        var bx: Int32 = 0
+        let below = Int32(CGDisplayBounds(first.displayID).height)
+        for id in ids where !screens.contains(where: { $0.displayID == id }) {
+            CGConfigureDisplayOrigin(cfg, id, bx, below)
+            bx += Int32(CGDisplayBounds(id).width)
+        }
+        let r = CGCompleteDisplayConfiguration(cfg, .forSession)
+        NSLog("[ISM] arranged displays, virtual \(first.displayID) as main: \(r == .success ? "ok" : "\(r)")")
+    }
+
     private func create(_ spec: ScreenSpec, streamID: UInt8) -> VirtualScreen? {
         let desc = CGVirtualDisplayDescriptor()
         desc.queue = DispatchQueue.main

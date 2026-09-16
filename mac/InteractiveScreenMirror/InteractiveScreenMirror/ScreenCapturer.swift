@@ -59,13 +59,27 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
 
     func requestKeyframe() { encoder?.requestKeyframe() }
 
+    /// Hidden on the headset: keep capturing (restart costs a second of black)
+    /// but encode and send nothing. Resume with an IDR so the decoder has a
+    /// clean reference.
+    // ponytail: SCStream keeps compositing while paused. Stop it if idle power matters.
+    var isPaused = false {
+        didSet { if !isPaused && oldValue { encoder?.requestKeyframe() } }
+    }
+
+    /// Share of the link this stream may use; nil means its own nominal rate.
+    func setBitrateCap(_ cap: Int?) {
+        guard let enc = encoder else { return }
+        enc.setBitrate(min(enc.nominalBitrate, cap ?? enc.nominalBitrate))
+    }
+
     func stop() async {
         try? await stream?.stopCapture()
         stream = nil
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sampleBuffer.isValid,
+        guard type == .screen, !isPaused, sampleBuffer.isValid,
               let pb = CMSampleBufferGetImageBuffer(sampleBuffer),
               let enc = encoder else { return }
         // Drop rather than queue when the encoder is behind: a late frame is

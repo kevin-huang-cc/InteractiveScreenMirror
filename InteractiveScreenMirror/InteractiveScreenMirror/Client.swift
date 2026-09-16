@@ -69,6 +69,7 @@ final class MirrorClient: ObservableObject {
     private let reassembler = Reassembler()
     private let queue = DispatchQueue(label: "ism.client")
     private var clickSeq: UInt32 = 0
+    private var sentActive: Set<UInt8>?
     private let statesLock = NSLock()
     private var forwarders: [AnyCancellable] = []
 
@@ -96,7 +97,10 @@ final class MirrorClient: ObservableObject {
         // One RealityView draws every screen, so any stream change must
         // invalidate the client it observes.
         forwarders.append(s.objectWillChange.sink { [weak self] in
-            DispatchQueue.main.async { self?.objectWillChange.send() }
+            DispatchQueue.main.async {
+                self?.objectWillChange.send()
+                self?.syncActive()
+            }
         })
         s.decoder.onPixelBuffer = { [weak s] pb in
             // Blit on the decoder thread; staying off main keeps frames out of
@@ -140,6 +144,8 @@ final class MirrorClient: ObservableObject {
             case .ready:
                 self.publish("connected")
                 self.send(.hello, stream: 0, Data())
+                self.sentActive = nil
+                DispatchQueue.main.async { self.syncActive() }
                 self.receiveLoop(conn)
             case .failed(let e):
                 self.publish("failed: \(e)")
@@ -180,6 +186,19 @@ final class MirrorClient: ObservableObject {
         clickSeq &+= 1
         let seq = clickSeq
         for _ in 0..<3 { emit(.setMode, stream: stream, id: seq, payload) }
+    }
+
+    /// Tells the Mac which displays are shown so it can pause the rest and
+    /// split bandwidth among the visible ones. Sent on every change, three
+    /// times like the other commands.
+    private func syncActive() {
+        let ids = Set(streamIDs.filter { state(for: $0).isOpen })
+        guard ids != sentActive,
+              let payload = try? JSONSerialization.data(withJSONObject: ["ids": ids.sorted().map(Int.init)]) else { return }
+        sentActive = ids
+        clickSeq &+= 1
+        let seq = clickSeq
+        for _ in 0..<3 { emit(.active, stream: 0, id: seq, payload) }
     }
 
     private func send(_ type: WireType, stream: UInt8, _ payload: Data) {

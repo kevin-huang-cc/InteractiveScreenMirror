@@ -27,6 +27,7 @@ final class Server {
 
     var onKeyframeRequest: (UInt8) -> Void = { _ in }
     var onSetMode: (UInt8, Int, Int) -> Void = { _, _, _ in }
+    var onActiveStreams: (Set<UInt8>) -> Void = { _ in }
 
     init() {
         reassembler.onMessage = { [weak self] h, payload in
@@ -140,6 +141,11 @@ final class Server {
                   let w = (obj["w"] as? NSNumber)?.intValue,
                   let hh = (obj["h"] as? NSNumber)?.intValue else { return }
             onSetMode(h.stream, w, hh)
+        case .active:
+            guard isNewCommand(h) else { return }
+            guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+                  let ids = obj["ids"] as? [NSNumber] else { return }
+            onActiveStreams(Set(ids.map(\.uint8Value)))
         case .click:
             guard isNewCommand(h) else { return }
             guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],

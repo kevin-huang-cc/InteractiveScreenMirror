@@ -31,11 +31,12 @@ final class ScreenTexture {
     func push(_ pb: CVPixelBuffer) {
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         if queue == nil || size != CGSize(width: w, height: h) {
-            // ponytail: bgra8Unorm_srgb so sampling linearises the sRGB video bytes.
-            // If colours look washed out or crushed, this format is the knob.
+            // sRGB format so sampling linearises the video bytes. Mipmaps so the
+            // screen filters cleanly when it covers fewer display pixels than the
+            // video has; without them small text turns to shimmering moiré.
             let desc = TextureResource.DrawableQueue.Descriptor(
                 pixelFormat: .bgra8Unorm_srgb, width: w, height: h,
-                usage: [.shaderRead, .renderTarget], mipmapsMode: .none)
+                usage: [.shaderRead, .renderTarget], mipmapsMode: .allocateAndGenerateAll)
             guard let q = try? TextureResource.DrawableQueue(desc) else { return }
             q.allowsNextDrawableTimeout = true
             queue = q

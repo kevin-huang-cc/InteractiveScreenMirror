@@ -44,6 +44,7 @@ One UDP socket carries every stream. Datagram header is 10 bytes:
 | `0x20` HELLO | VP → Mac | announces the client endpoint |
 | `0x21` KEYFRAMEREQ | VP → Mac | a fragment was lost, resync now |
 | `0x22` SETMODE | VP → Mac | JSON `{w,h}` — switch this display's resolution |
+| `0x23` ACTIVE | VP → Mac | JSON `{ids:[…]}` — displays currently shown; the Mac pauses the rest and splits an 80 Mbit/s budget among these |
 
 UDP has no retransmission, so reliability is bought with repetition instead:
 PARAM and META ride along with every keyframe, and clicks and mode changes are
@@ -90,6 +91,14 @@ radius from the window width between a min/max width; RealityKit's
 `UICurvatureComponent` bends the window layer onto that cylinder. Apps opt in
 through MRUIKit's private `preferredWindowCurvature` on `UIWindowScene`, which
 is Apple-only in visionOS 27, hence the mesh here.
+
+## Main display
+
+At launch the Mac app arranges the first virtual display at the origin, which
+makes it the main display (menu bar, Dock, new windows land there), lines the
+other virtual displays up to its right, and moves the built-in screen
+underneath. The arrangement is session-scoped: when the app quits and the
+virtual displays vanish, macOS falls back to the built-in panel as main.
 
 ## Configuring virtual displays
 
