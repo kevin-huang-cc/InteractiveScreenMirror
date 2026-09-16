@@ -21,7 +21,7 @@ struct InteractiveScreenMirrorApp: App {
         // With a backdrop the Crown dials passthrough against our skybox.
         .immersionStyle(selection: .constant(backdrop == Backdrop.none.rawValue
                                                 ? .mixed
-                                                : .progressive(0.1...1, initialAmount: immersion)),
+                                                : .progressive(0.1...1, initialAmount: min(1, max(0.1, immersion)))),
                         in: .mixed, .progressive)
         .upperLimbVisibility(handsVisible ? .visible : .hidden)
     }

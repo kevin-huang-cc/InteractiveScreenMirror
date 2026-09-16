@@ -7,6 +7,7 @@ final class VideoDecoder {
     private var lastParams: Data?
     private var needsKeyframe = false
     private var session: VTDecompressionSession?
+    private var isHEVC = true
 
     /// Decoded BGRA frames, delivered on VideoToolbox's callback thread.
     var onPixelBuffer: (CVPixelBuffer) -> Void = { _ in }
@@ -20,29 +21,41 @@ final class VideoDecoder {
 
     /// Parameter sets arrive with every keyframe over UDP. Rebuilding the format
     /// description each time would churn the decoder, so ignore repeats.
+    /// Payload: [1B codec 'h'|'v'][1B count]{[4B len][bytes]}…
     func handleParameterSets(_ data: Data) {
-        guard data != lastParams else { return }
-        var cursor = 0
-        guard let sps = readChunk(data, cursor: &cursor),
-              let pps = readChunk(data, cursor: &cursor) else { return }
+        guard data != lastParams, data.count >= 2 else { return }
+        let codec = data[data.startIndex], count = Int(data[data.startIndex + 1])
+        var cursor = 2
+        var sets: [Data] = []
+        for _ in 0..<count {
+            guard let d = readChunk(data, cursor: &cursor) else { return }
+            sets.append(d)
+        }
+        isHEVC = codec == UInt8(ascii: "v")
+
+        // Copy each set into its own buffer so the pointers stay valid for the call.
+        let buffers: [UnsafeMutableBufferPointer<UInt8>] = sets.map { d in
+            let b = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: max(d.count, 1))
+            _ = b.initialize(from: d)
+            return b
+        }
+        defer { buffers.forEach { $0.deallocate() } }
+        let pointers = buffers.map { UnsafePointer($0.baseAddress!) }
+        let sizes = sets.map(\.count)
 
         var fd: CMVideoFormatDescription?
-        sps.withUnsafeBytes { spsRaw in
-            pps.withUnsafeBytes { ppsRaw in
-                guard let sp = spsRaw.bindMemory(to: UInt8.self).baseAddress,
-                      let pp = ppsRaw.bindMemory(to: UInt8.self).baseAddress else { return }
-                let pointers = [sp, pp]
-                let sizes = [sps.count, pps.count]
-                pointers.withUnsafeBufferPointer { pb in
-                    sizes.withUnsafeBufferPointer { sb in
-                        CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                            allocator: kCFAllocatorDefault,
-                            parameterSetCount: 2,
-                            parameterSetPointers: pb.baseAddress!,
-                            parameterSetSizes: sb.baseAddress!,
-                            nalUnitHeaderLength: 4,
-                            formatDescriptionOut: &fd)
-                    }
+        pointers.withUnsafeBufferPointer { pb in
+            sizes.withUnsafeBufferPointer { sb in
+                if isHEVC {
+                    CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault, parameterSetCount: sets.count,
+                        parameterSetPointers: pb.baseAddress!, parameterSetSizes: sb.baseAddress!,
+                        nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &fd)
+                } else {
+                    CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                        allocator: kCFAllocatorDefault, parameterSetCount: sets.count,
+                        parameterSetPointers: pb.baseAddress!, parameterSetSizes: sb.baseAddress!,
+                        nalUnitHeaderLength: 4, formatDescriptionOut: &fd)
                 }
             }
         }
@@ -82,7 +95,7 @@ final class VideoDecoder {
     func handleFrame(_ data: Data) {
         guard let fd = formatDescription, let session else { return }
         if needsKeyframe {
-            guard Self.containsIDR(data) else { return }
+            guard Self.containsIDR(data, hevc: isHEVC) else { return }
             needsKeyframe = false
         }
 
@@ -119,8 +132,9 @@ final class VideoDecoder {
                                           frameRefcon: nil, infoFlagsOut: nil)
     }
 
-    /// Walks the AVCC length-prefixed NAL units looking for an IDR (type 5).
-    private static func containsIDR(_ data: Data) -> Bool {
+    /// Walks the length-prefixed NAL units looking for an IDR: H.264 type 5,
+    /// HEVC types 19–21 (IDR_W_RADL, IDR_N_LP, CRA).
+    private static func containsIDR(_ data: Data, hevc: Bool) -> Bool {
         var i = data.startIndex
         while i + 4 <= data.endIndex {
             let len = Int(data[i..<(i + 4)].withUnsafeBytes {
@@ -128,7 +142,12 @@ final class VideoDecoder {
             })
             i += 4
             guard len > 0, i + len <= data.endIndex else { return false }
-            if data[i] & 0x1F == 5 { return true }
+            if hevc {
+                let t = (data[i] >> 1) & 0x3F
+                if (19...21).contains(t) { return true }
+            } else if data[i] & 0x1F == 5 {
+                return true
+            }
             i += len
         }
         return false

@@ -7,6 +7,7 @@ struct ContentView: View {
     @EnvironmentObject private var client: MirrorClient
     @Environment(\.openImmersiveSpace) private var openSpace
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("backdrop") private var backdrop = Backdrop.none.rawValue
     @AppStorage("backdropVersion") private var backdropVersion = 0
     @State private var photoPick: PhotosPickerItem?
@@ -33,6 +34,8 @@ struct ContentView: View {
         }
         .padding(40)
         .onAppear { client.start() }
+        // Leaving the app (or closing it) hands the Mac its own screen back.
+        .onChange(of: scenePhase) { _, phase in client.suspended = phase != .active }
         // Screens left open last time come back when the Mac shows up.
         .onChange(of: client.streamIDs) { _, ids in
             if ids.contains(where: { client.state(for: $0).isOpen }) { ensureSpace() }

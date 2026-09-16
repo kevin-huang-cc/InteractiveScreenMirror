@@ -14,6 +14,9 @@ final class Server {
     private let reassembler = Reassembler()
 
     private var screens: [VirtualScreen] = []
+    /// Meta keeps listing displays that are torn down while hidden, otherwise
+    /// the headset's lobby would lose the button to show them again.
+    private var metaEntries: [UInt8: [String: Any]] = [:]
     private var msgIDs: [UInt8: UInt32] = [:]
     /// Cached per stream so a client connecting after the initial IDR can start
     /// decoding immediately instead of waiting for the next keyframe.
@@ -27,16 +30,41 @@ final class Server {
 
     var onKeyframeRequest: (UInt8) -> Void = { _ in }
     var onSetMode: (UInt8, Int, Int) -> Void = { _, _, _ in }
-    var onActiveStreams: (Set<UInt8>) -> Void = { _ in }
+    /// Shown displays and how the headset has them placed.
+    struct Layout {
+        var ids: [UInt8]        // left to right
+        var main: UInt8?        // the one in front of the user
+        var below: [UInt8: Double]   // desk-height screens → where their centre falls across the main (0…1)
+    }
+    var onActiveStreams: (Layout) -> Void = { _ in }
+    private var lastSeen = Date.distantPast
+    private var clientPresent = false
+    private var presence: DispatchSourceTimer?
 
     init() {
         reassembler.onMessage = { [weak self] h, payload in
+            self?.lastSeen = Date()
+            self?.clientPresent = true
             self?.handle(h, payload)
         }
+        // The headset pings every 2 s; silence for 6 s means it is gone
+        // (crashed, asleep, out of range) and the Mac should look like it never
+        // connected: no displays shown, own screen back.
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in
+            guard let self, self.clientPresent, Date().timeIntervalSince(self.lastSeen) > 6 else { return }
+            self.clientPresent = false
+            NSLog("[ISM] headset silent for 6 s, treating as disconnected")
+            self.onActiveStreams(Layout(ids: [], main: nil, below: [:]))
+        }
+        t.resume()
+        presence = t
     }
 
     func start(screens: [VirtualScreen]) throws {
         self.screens = screens
+        remember(screens)
         let params = NWParameters.udp
         // AWDL: the direct Mac<->Vision Pro radio path, skipping the router.
         params.includePeerToPeer = true
@@ -99,15 +127,20 @@ final class Server {
     func updateScreens(_ screens: [VirtualScreen]) {
         queue.async {
             self.screens = screens
+            self.remember(screens)
             self.sendMeta()
         }
     }
 
-    private func sendMeta() {
-        let list: [[String: Any]] = screens.map {
-            ["id": Int($0.streamID), "w": $0.width, "h": $0.height,
-             "modes": $0.availableModes.map { [$0.width, $0.height] }]
+    private func remember(_ screens: [VirtualScreen]) {
+        for s in screens {
+            metaEntries[s.streamID] = ["id": Int(s.streamID), "w": s.width, "h": s.height,
+                                       "modes": s.availableModes.map { [$0.width, $0.height] }]
         }
+    }
+
+    private func sendMeta() {
+        let list = metaEntries.keys.sorted().compactMap { metaEntries[$0] }
         guard let json = try? JSONSerialization.data(withJSONObject: list) else { return }
         emit(.meta, stream: 0, json)
     }
@@ -145,7 +178,14 @@ final class Server {
             guard isNewCommand(h) else { return }
             guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                   let ids = obj["ids"] as? [NSNumber] else { return }
-            onActiveStreams(Set(ids.map(\.uint8Value)))
+            let main = (obj["main"] as? NSNumber)?.intValue ?? -1
+            var below: [UInt8: Double] = [:]
+            for (k, v) in obj["below"] as? [String: NSNumber] ?? [:] {
+                if let id = UInt8(k) { below[id] = v.doubleValue }
+            }
+            onActiveStreams(Layout(ids: ids.map(\.uint8Value),
+                                   main: main >= 0 ? UInt8(main) : nil,
+                                   below: below))
         case .click:
             guard isNewCommand(h) else { return }
             guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],

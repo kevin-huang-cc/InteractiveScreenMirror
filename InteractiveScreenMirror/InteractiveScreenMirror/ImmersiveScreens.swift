@@ -103,7 +103,13 @@ struct ScreensSpace: View {
                 default: break
                 }
             }
-            .onEnded { _ in rig.dragStart = nil })
+            .onEnded { value in
+                rig.dragStart = nil
+                // A placement just changed: the Mac's arrangement is judged from here.
+                if let (_, role) = Self.parse(value.entity.name), role == "bar", let head = rig.head {
+                    client.viewpoint = head.position
+                }
+            })
     }
 
     /// Swap the skybox when the choice (or the photo behind it) changes.
@@ -118,12 +124,18 @@ struct ScreensSpace: View {
         rig.animatedSky = nil
         let choice = Backdrop(rawValue: backdrop) ?? .none
         if choice == .matrix {
-            guard let anim = AnimatedSky(kernel: "matrixRain", source: matrixRainSource) else { return }
+            guard let anim = AnimatedSky(kernel: "matrixRain", source: matrixRainSource,
+                                         atlas: "matrixcode_msdf") else { return }
             rig.animatedSky = anim
-            let sky = Backdrop.skybox(anim.texture)
-            content.add(sky)
-            rig.sky = sky
-            rig.skyTick = content.subscribe(to: SceneEvents.Update.self) { _ in anim.render() }
+            content.add(anim.entity)
+            rig.sky = anim.entity
+            let rig = rig
+            var tick = 0
+            // Every other frame: 45 Hz is plenty for rain and halves the 4K kernel cost.
+            rig.skyTick = content.subscribe(to: SceneEvents.Update.self) { _ in
+                tick += 1
+                if tick % 2 == 0 { anim.render(head: rig.head?.position) }
+            }
             return
         }
         // TextureResource creation is main-actor bound; a photo decodes in well
@@ -175,6 +187,7 @@ struct ScreensSpace: View {
             stream.position = head.position + f * 1.5
             stream.yaw = atan2(-f.x, -f.z)
             stream.placed = true
+            client.viewpoint = head.position
         }
         var m = UnlitMaterial()
         m.color = .init(texture: .init(stream.screen.texture))
@@ -260,26 +273,23 @@ struct ScreenPanel: View {
         .glassBackgroundEffect()
     }
 
+    /// Popovers cannot open inside an immersive space, so no Menu: every mode
+    /// is a button, the current one highlighted.
     @ViewBuilder private var resolutionPicker: some View {
         if stream.modes.count > 1 {
-            Menu {
+            Label("Resolution", systemImage: "rectangle.inset.filled")
+            VStack(alignment: .leading, spacing: 6) {
                 ForEach(stream.modes, id: \.self) { mode in
                     Button {
                         client.setMode(stream: stream.id, width: Int(mode.width), height: Int(mode.height))
                     } label: {
-                        if mode == stream.size {
-                            Label("\(Int(mode.width)) × \(Int(mode.height))", systemImage: "checkmark")
-                        } else {
-                            Text("\(Int(mode.width)) × \(Int(mode.height))")
-                        }
+                        Text("\(Int(mode.width)) × \(Int(mode.height))")
+                            .frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.bordered)
+                    .tint(mode == stream.size ? .accentColor : nil)
                 }
-            } label: {
-                Label(stream.size == .zero ? "Resolution"
-                        : "\(Int(stream.size.width)) × \(Int(stream.size.height))",
-                      systemImage: "rectangle.inset.filled")
             }
-            .menuStyle(.button)
         }
     }
 }

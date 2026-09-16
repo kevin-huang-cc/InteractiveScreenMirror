@@ -7,6 +7,12 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 
+/// Turns a display off entirely (it leaves Displays settings), the way Mac
+/// Virtual Display blanks the built-in panel. Exported by CoreGraphics; used
+/// by BetterDisplay and DisableMonitor for the same purpose.
+CGError CGSConfigureDisplayEnabled(CGDisplayConfigRef _Nonnull config,
+                                   CGDirectDisplayID display, bool enabled);
+
 @interface CGVirtualDisplayDescriptor : NSObject
 @property(strong) dispatch_queue_t queue;
 @property(copy) NSString *name;

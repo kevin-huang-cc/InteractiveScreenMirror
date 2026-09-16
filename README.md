@@ -15,7 +15,7 @@ Mac                                              Vision Pro
         |                                               |
   ScreenCaptureKit (one SCStream per display)      NWConnection (UDP)
         |                                               |
-  VTCompressionSession (H.264, one per stream)     Reassembler (per stream)
+  VTCompressionSession (HEVC, one per stream)      Reassembler (per stream)
         |                                               |
   UDP datagrams, fragmented, stream-tagged   ->    VideoDecoder x N
         |                                               |
@@ -38,13 +38,13 @@ One UDP socket carries every stream. Datagram header is 10 bytes:
 | Type | Direction | Payload |
 |------|-----------|---------|
 | `0x01` META | Mac → VP | JSON `[{id,w,h,modes}]` — one entry per virtual display |
-| `0x02` PARAM | Mac → VP | `[4B spsLen][SPS][4B ppsLen][PPS]` |
-| `0x03` FRAME | Mac → VP | AVCC NAL units, fragmented to 1200B |
+| `0x02` PARAM | Mac → VP | `[1B codec 'h'|'v'][1B count]{[4B len][bytes]}…` — HEVC VPS/SPS/PPS |
+| `0x03` FRAME | Mac → VP | length-prefixed HEVC NAL units, fragmented to 1200B |
 | `0x10` CLICK | VP → Mac | JSON `{x,y}` normalized 0..1 |
 | `0x20` HELLO | VP → Mac | announces the client endpoint |
 | `0x21` KEYFRAMEREQ | VP → Mac | a fragment was lost, resync now |
 | `0x22` SETMODE | VP → Mac | JSON `{w,h}` — switch this display's resolution |
-| `0x23` ACTIVE | VP → Mac | JSON `{ids:[…]}` — displays currently shown; the Mac pauses the rest and splits an 80 Mbit/s budget among these |
+| `0x23` ACTIVE | VP → Mac | JSON `{ids:[left→right], main, below:{id: fraction}}` — shown displays and their placement; the Mac tears down the rest, recreates these, arranges the desktop to match, and splits an 80 Mbit/s budget among them |
 
 UDP has no retransmission, so reliability is bought with repetition instead:
 PARAM and META ride along with every keyframe, and clicks and mode changes are
@@ -98,30 +98,55 @@ Apple's environments cannot appear behind a third-party immersive space (they
 are MobileAssets behind a private framework), so the app brings its own. The
 lobby has an Environment picker: None (passthrough), Presets, or Photo (any
 360° panorama from the library, kept in Documents). Presets opens a second row:
-Studio (a generated dark gradient) and Matrix (digital rain, a Metal compute
-kernel redrawing the skybox every frame; compiled from source at runtime so no
-Metal toolchain is needed).
+Studio (a generated dark gradient) and Matrix (digital rain adapted from
+Rezmason/matrix, MIT, see THIRD_PARTY_LICENSES.md: a Metal compute kernel using
+the original rain, cursor, glyph-cycling and palette maths plus its MSDF glyph
+atlas, drawn on three concentric spheres with different seeds so the rain has
+real stereo depth; compiled from source at runtime so no Metal toolchain is
+needed).
 With a backdrop chosen the space switches to progressive immersion, so the
 Digital Crown dials passthrough against the skybox; the level is remembered.
 
-## Main display
+## Main display and arrangement
 
-At launch the Mac app arranges the first virtual display at the origin, which
-makes it the main display (menu bar, Dock, new windows land there), lines the
-other virtual displays up to its right, and moves the built-in screen
-underneath. The arrangement is session-scoped: when the app quits and the
+The desktop arrangement follows the headset. Displays are ordered left to right
+by their bearing around you, the one most in front of you is main (menu bar,
+Dock, new windows), and any screen sitting more than 0.4 m below the main one,
+such as a display laid flat on the desk, goes underneath, centred where its
+bearing falls across the main display's width (so a desk screen off to the
+right sits under the right part of the main one). Moving
+screens around re-sends the layout only when the order changes. Before the
+headset connects, the first virtual display is main with the rest to its right;
+the built-in screen is parked underneath in either case. The arrangement is session-scoped: when the app quits and the
 virtual displays vanish, macOS falls back to the built-in panel as main.
+
+While the headset shows at least one display, the MacBook's built-in panel is
+switched off with `CGSConfigureDisplayEnabled` (private, the same call
+BetterDisplay uses to "disconnect" a display): it goes black and leaves
+Displays settings, so the virtual displays are all macOS has, as with Apple's
+Mac Virtual Display. It comes back when no display is shown or the app quits.
+The app remembers the panel's id and turns it back on at the next launch if a
+previous run was killed with it off; Ctrl-C and SIGTERM restore it before
+exiting. If you are stuck without the app, run `swift tools/enable-builtin.swift`
+from another display or over SSH, or close and reopen the lid.
 
 ## Configuring virtual displays
 
-Edit `ScreenSpec.defaults` in `mac/.../VirtualDisplayManager.swift`:
+Edit `ScreenSpec.defaults` in `mac/.../VirtualDisplayManager.swift`. Sizes are
+in points; every display is Retina, so the stream carries double:
 
 ```swift
 static let defaults: [ScreenSpec] = [
-    ScreenSpec(name: "ISM Wide",     width: 2560, height: 1080, hiDPI: false),
-    ScreenSpec(name: "ISM Portrait", width: 1200, height: 1600, hiDPI: false),
+    ScreenSpec(name: "ISM Wide",     width: 2560, height: 1080, refreshRate: 60),   // 5120×2160 px
+    ScreenSpec(name: "ISM Portrait", width: 1200, height: 1600, refreshRate: 60),   // 2400×3200 px
 ]
 ```
+
+Apple's Mac Virtual Display offers 5120×2880 (Standard), 6720×2880 (Wide) and
+10240×2880 (Ultrawide), all at 2x. Getting 2x modes out of a virtual display
+on macOS 26 needs three things at once (see `tools/hidpi-probe.swift`): the
+hiDPI flag, the mode declared in points with the pixel cap at double, and a
+declared physical size around 220 DPI. Miss any one and macOS offers 1x only.
 
 Any aspect ratio works. Note that Vision Pro resolves roughly 34 pixels per
 degree, so a window filling ~60° of view is saturated around 2000px wide —

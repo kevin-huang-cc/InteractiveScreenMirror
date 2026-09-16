@@ -28,7 +28,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
                 NSLocalizedDescriptionKey: "display \(displayID) not visible to ScreenCaptureKit"])
         }
 
-        let enc = try VideoEncoder(width: display.width, height: display.height, fps: fps)
+        // SCDisplay.width/height are points; a 2x display has double the pixels.
+        let pw = Int(CGDisplayPixelsWide(displayID)), ph = Int(CGDisplayPixelsHigh(displayID))
+        let enc = try VideoEncoder(width: pw, height: ph, fps: fps)
         enc.onParameterSets = { [weak self] in
             guard let self else { return }
             self.onParameterSets(self.streamID, $0)
@@ -40,8 +42,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
         encoder = enc
 
         let cfg = SCStreamConfiguration()
-        cfg.width = display.width
-        cfg.height = display.height
+        cfg.width = pw
+        cfg.height = ph
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         // 3 is the SCK minimum for realtime. The previous 5 held ~83ms of
@@ -59,14 +61,6 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
 
     func requestKeyframe() { encoder?.requestKeyframe() }
 
-    /// Hidden on the headset: keep capturing (restart costs a second of black)
-    /// but encode and send nothing. Resume with an IDR so the decoder has a
-    /// clean reference.
-    // ponytail: SCStream keeps compositing while paused. Stop it if idle power matters.
-    var isPaused = false {
-        didSet { if !isPaused && oldValue { encoder?.requestKeyframe() } }
-    }
-
     /// Share of the link this stream may use; nil means its own nominal rate.
     func setBitrateCap(_ cap: Int?) {
         guard let enc = encoder else { return }
@@ -79,7 +73,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, !isPaused, sampleBuffer.isValid,
+        guard type == .screen, sampleBuffer.isValid,
               let pb = CMSampleBufferGetImageBuffer(sampleBuffer),
               let enc = encoder else { return }
         // Drop rather than queue when the encoder is behind: a late frame is

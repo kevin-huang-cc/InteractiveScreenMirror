@@ -23,7 +23,7 @@ final class VideoEncoder {
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width), height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
+            codecType: kCMVideoCodecType_HEVC,
             encoderSpecification: spec as CFDictionary, imageBufferAttributes: nil,
             compressedDataAllocator: nil, outputCallback: nil, refcon: nil,
             compressionSessionOut: &s)
@@ -34,7 +34,8 @@ final class VideoEncoder {
         self.session = session
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
+        // HEVC: H.264 tops out at 4096 wide, and a 2x ultrawide is 5120.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         // Without this the encoder may hold frames for lookahead — pure added latency.
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))
@@ -44,9 +45,9 @@ final class VideoEncoder {
         // and any single loss costs the whole frame.
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: fps * 2))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
-        // Text is the worst case for H.264 4:2:0 — sharp edges and high
-        // frequency detail. Scale bitrate with pixels rather than fixing it.
-        nominalBitrate = min(60_000_000, max(12_000_000, width * height * fps / 12))
+        // Text is the worst case for 4:2:0 — sharp edges and high frequency
+        // detail. Scale bitrate with pixels; HEVC needs roughly half of H.264.
+        nominalBitrate = min(80_000_000, max(12_000_000, width * height * fps / 20))
         setBitrate(nominalBitrate)
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
@@ -121,26 +122,24 @@ final class VideoEncoder {
         return !CFDictionaryContainsKey(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque())
     }
 
+    /// Wire PARAM payload: [1B codec 'h'|'v'][1B count]{[4B len][bytes]}…
+    /// HEVC carries VPS, SPS, PPS; H.264 would carry two.
     private static func extractParameterSets(_ fd: CMVideoFormatDescription) -> Data? {
-        var spsPtr: UnsafePointer<UInt8>?, ppsPtr: UnsafePointer<UInt8>?
-        var spsLen = 0, ppsLen = 0
-        guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                fd, parameterSetIndex: 0, parameterSetPointerOut: &spsPtr,
-                parameterSetSizeOut: &spsLen, parameterSetCountOut: nil,
-                nalUnitHeaderLengthOut: nil) == noErr,
-              CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                fd, parameterSetIndex: 1, parameterSetPointerOut: &ppsPtr,
-                parameterSetSizeOut: &ppsLen, parameterSetCountOut: nil,
-                nalUnitHeaderLengthOut: nil) == noErr,
-              let sps = spsPtr, let pps = ppsPtr else { return nil }
-
-        var out = Data()
-        var a = UInt32(spsLen).bigEndian
-        withUnsafeBytes(of: &a) { out.append(contentsOf: $0) }
-        out.append(sps, count: spsLen)
-        var b = UInt32(ppsLen).bigEndian
-        withUnsafeBytes(of: &b) { out.append(contentsOf: $0) }
-        out.append(pps, count: ppsLen)
+        var count = 0
+        guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                fd, parameterSetIndex: 0, parameterSetPointerOut: nil, parameterSetSizeOut: nil,
+                parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil) == noErr, count > 0 else { return nil }
+        var out = Data([UInt8(ascii: "v"), UInt8(count)])
+        for i in 0..<count {
+            var ptr: UnsafePointer<UInt8>?
+            var len = 0
+            guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    fd, parameterSetIndex: i, parameterSetPointerOut: &ptr, parameterSetSizeOut: &len,
+                    parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr, let p = ptr else { return nil }
+            var n = UInt32(len).bigEndian
+            withUnsafeBytes(of: &n) { out.append(contentsOf: $0) }
+            out.append(p, count: len)
+        }
         return out
     }
 }

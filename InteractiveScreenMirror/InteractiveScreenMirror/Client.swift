@@ -69,7 +69,17 @@ final class MirrorClient: ObservableObject {
     private let reassembler = Reassembler()
     private let queue = DispatchQueue(label: "ism.client")
     private var clickSeq: UInt32 = 0
-    private var sentActive: Set<UInt8>?
+    private var sentActive: Data?
+    /// Head position when a screen was last placed. Bearings for the Mac's
+    /// arrangement are taken from here, so walking around changes nothing;
+    /// only dragging a screen does.
+    var viewpoint = SIMD3<Float>(0, 0, 0)
+    /// App in the background: tell the Mac nothing is shown so it gets its own
+    /// screen back at once, without touching what the user has open.
+    var suspended = false {
+        didSet { if suspended != oldValue { DispatchQueue.main.async { self.syncActive() } } }
+    }
+    private var heartbeat: DispatchSourceTimer?
     private let statesLock = NSLock()
     private var forwarders: [AnyCancellable] = []
 
@@ -146,6 +156,7 @@ final class MirrorClient: ObservableObject {
                 self.send(.hello, stream: 0, Data())
                 self.sentActive = nil
                 DispatchQueue.main.async { self.syncActive() }
+                self.startHeartbeat()
                 self.receiveLoop(conn)
             case .failed(let e):
                 self.publish("failed: \(e)")
@@ -188,14 +199,48 @@ final class MirrorClient: ObservableObject {
         for _ in 0..<3 { emit(.setMode, stream: stream, id: seq, payload) }
     }
 
-    /// Tells the Mac which displays are shown so it can pause the rest and
-    /// split bandwidth among the visible ones. Sent on every change, three
-    /// times like the other commands.
+    /// Tells the Mac which displays are shown and how they sit around you:
+    /// ids left to right by bearing, the one most in front as main, and any
+    /// screen well below the main one (a desk display) to go underneath. The
+    /// Mac tears down the rest and arranges the desktop to match. Sent only
+    /// when the arrangement changes, three times like the other commands.
+    /// UDP has no connection state, so presence is a 2 s ping. If the headset
+    /// crashes or sleeps the Mac notices within 6 s and restores its own screen.
+    private func startHeartbeat() {
+        heartbeat?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in self?.send(.ping, stream: 0, Data()) }
+        t.resume()
+        heartbeat = t
+    }
+
     private func syncActive() {
-        let ids = Set(streamIDs.filter { state(for: $0).isOpen })
-        guard ids != sentActive,
-              let payload = try? JSONSerialization.data(withJSONObject: ["ids": ids.sorted().map(Int.init)]) else { return }
-        sentActive = ids
+        let open = suspended ? [] : streamIDs.map { state(for: $0) }.filter(\.isOpen)
+        // Bearing from where you stood when you last placed a screen; front is -z.
+        func bearing(_ s: StreamState) -> Float {
+            atan2(s.position.x - viewpoint.x, -(s.position.z - viewpoint.z))
+        }
+        let ordered = open.sorted { bearing($0) < bearing($1) }
+        let main = open.min { abs(bearing($0)) < abs(bearing($1)) }
+        // Screens well under the main one go in a row beneath it. Each carries
+        // where its centre falls across the main display's width (0 = left edge,
+        // 1 = right edge), from its bearing against the main's angular width.
+        var below: [String: Double] = [:]
+        if let m = main {
+            let dx = m.position.x - viewpoint.x, dz = m.position.z - viewpoint.z
+            let d = (dx * dx + dz * dz).squareRoot()
+            let mainAngle = 2 * atan((1.3 * m.zoom / 2) / max(d, 0.1))
+            for s in open where s.position.y < m.position.y - 0.4 {
+                below["\(s.id)"] = Double(0.5 + (bearing(s) - bearing(m)) / mainAngle)
+            }
+        }
+        let obj: [String: Any] = ["ids": ordered.map { Int($0.id) },
+                                  "main": main.map { Int($0.id) } ?? -1,
+                                  "below": below.mapValues { (($0 * 20).rounded() / 20) }]   // 5% steps: no resend for jitter
+        guard let payload = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
+              payload != sentActive else { return }
+        sentActive = payload
         clickSeq &+= 1
         let seq = clickSeq
         for _ in 0..<3 { emit(.active, stream: 0, id: seq, payload) }

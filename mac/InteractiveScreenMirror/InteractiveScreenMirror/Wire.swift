@@ -2,13 +2,14 @@ import Foundation
 
 enum WireType: UInt8 {
     case meta        = 0x01   // Mac -> VP  : JSON [{id,w,h,name}]
-    case param       = 0x02   // Mac -> VP  : [4B spsLen][SPS][4B ppsLen][PPS]
-    case frame       = 0x03   // Mac -> VP  : AVCC NAL units
+    case param       = 0x02   // Mac -> VP  : [1B codec 'h'|'v'][1B count]{[4B len][bytes]}…
+    case frame       = 0x03   // Mac -> VP  : length-prefixed NAL units (HEVC)
     case click       = 0x10   // VP  -> Mac : JSON {x,y}
     case hello       = 0x20   // VP  -> Mac : announces the client endpoint
     case keyframeReq = 0x21   // VP  -> Mac : a frame was lost, resync now
     case setMode     = 0x22   // VP  -> Mac : JSON {w,h} switch this display's resolution
-    case active      = 0x23   // VP  -> Mac : JSON {ids:[...]} streams currently shown; others pause
+    case active      = 0x23   // VP  -> Mac : JSON {ids:[left→right], main, below:{...}} shown streams and layout
+    case ping        = 0x24   // VP  -> Mac : heartbeat; 6 s without one means the headset is gone
 }
 
 /// Datagram layout: [1B type][1B streamID][4B msgID][2B fragIndex][2B fragCount][payload]
